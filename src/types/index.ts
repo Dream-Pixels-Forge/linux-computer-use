@@ -162,6 +162,12 @@ export interface WindowStateResult {
   truncated: boolean;
   /** Elements skipped because they lie outside the window's visible area; scroll to reveal them. */
   offscreen: number;
+  /**
+   * "screen": element geometry is in screen pixels (X11).
+   * "window": geometry is relative to the window's top-left corner (Wayland,
+   * where a window's screen position is unknown); window geometry is 0,0 there.
+   */
+  coordinates: "screen" | "window";
   tree_markdown: string;
   elements: Element[];
 }

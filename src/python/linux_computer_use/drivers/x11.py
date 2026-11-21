@@ -3,9 +3,8 @@
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
 
-from linux_computer_use.drivers.atspi import ATSPIDriver
+from linux_computer_use.drivers.atspi import ATSPIDriver, TreeCache
 from linux_computer_use.drivers.base import Driver, Element, Window, WindowState
 
 
@@ -19,11 +18,7 @@ class X11Driver(Driver):
         self._shot_dir: Path | None = None
         self._shot_count = 0
         self.atspi = ATSPIDriver()
-        # Accessibles from the most recent tree read, keyed by (window_id, index),
-        # so actions can use AT-SPI on exactly the element the caller saw.
-        self._accessibles: dict[tuple[int, int], Any] = {}
-        self._parents: dict[tuple[int, int], int] = {}
-        self._roots: dict[int, Any] = {}
+        self._tree = TreeCache()
         # Windows whose toolkit screen coordinates are wrong (e.g. GTK 4):
         # window_id -> the root's window-relative origin, so screen positions
         # can be rebuilt from the window's current X11 position.
@@ -195,10 +190,7 @@ class X11Driver(Driver):
             else None
         )
 
-        for key in [k for k in self._accessibles if k[0] == window_id]:
-            del self._accessibles[key]
-            self._parents.pop(key, None)
-        self._roots.pop(window_id, None)
+        self._tree.forget(window_id)
         self._relative_roots.pop(window_id, None)
 
         root = self.atspi.find_window(pid, title, rect)
@@ -206,16 +198,10 @@ class X11Driver(Driver):
             offset = self.atspi.window_offset(root, rect)
             tree = self.atspi.read_tree(root, window_id, self._screen_rect(), offset)
             if tree.elements:
-                self._roots[window_id] = root
+                self._tree.remember(window_id, root, tree)
                 if offset is not None and rect is not None:
                     self._relative_roots[window_id] = (rect[0] - offset[0], rect[1] - offset[1])
-                for element, accessible in zip(tree.elements, tree.accessibles, strict=True):
-                    self._accessibles[(window_id, element.index)] = accessible
-                    self._parents[(window_id, element.index)] = element.parent_index
-                if not tree.sensitive and self.atspi.find_sensitive(root):
-                    # The walk skips off-screen content; the Collection query doesn't.
-                    tree.sensitive = True
-                    tree.sensitive_reasons.append("password field (outside the visible area)")
+                self.atspi.finish(tree, root)
                 return WindowState(
                     window_id=window_id,
                     pid=pid,
@@ -271,11 +257,11 @@ class X11Driver(Driver):
         For windows without an accessibility tree only index 0 (the window
         itself) exists, rebuilt from the current geometry.
         """
-        accessible = self._accessibles.get((window_id, index))
+        accessible = self._tree.node(window_id, index)
         if accessible is not None:
-            parent = self._parents.get((window_id, index), -1)
+            parent = self._tree.parent(window_id, index)
             return self.atspi.refresh(accessible, window_id, index, parent, self._offset(window_id))
-        if index != 0 or window_id in self._roots:
+        if index != 0 or self._tree.root(window_id) is not None:
             return None
         window = self.get_window(window_id)
         if window is None:
@@ -303,7 +289,7 @@ class X11Driver(Driver):
         One AT-SPI Collection query on the window's accessible; falls back to
         a full tree read if the app doesn't support Collection.
         """
-        root = self._roots.get(window_id)
+        root = self._tree.root(window_id)
         if root is None:
             return self.get_window_state(window_id).sensitive_reasons
         reasons = self.atspi.find_sensitive(root)
@@ -317,7 +303,7 @@ class X11Driver(Driver):
         Prefers the element's accessible click/press action (works even when
         the element is covered), otherwise clicks the centre of its bounds.
         """
-        accessible = self._accessibles.get((element.window_id, element.index))
+        accessible = self._tree.node(element.window_id, element.index)
         if accessible is not None and self.atspi.do_click_action(accessible):
             return True
         if element.width <= 0 or element.height <= 0:
@@ -344,7 +330,7 @@ class X11Driver(Driver):
         Index 0 is the window itself: typing goes to whatever has focus there.
         """
         if element.index != 0:
-            accessible = self._accessibles.get((element.window_id, element.index))
+            accessible = self._tree.node(element.window_id, element.index)
             focused = accessible is not None and self.atspi.grab_focus(accessible)
             if not focused and not self.click(element):
                 return False
