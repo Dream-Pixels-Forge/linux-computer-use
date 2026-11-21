@@ -17,13 +17,15 @@ class X11Driver(Driver):
         """Initialize X11 driver."""
         self.display = display or ":0"
         self._connected = False
+        self._shot_dir: Optional[Path] = None
+        self._shot_count = 0
     
     def connect(self) -> bool:
         """Connect to X11 server."""
         try:
             # Test X11 connection
             result = subprocess.run(
-                ["xdotool", "getmwindowsize", "--shell"],
+                ["xdotool", "getdisplaygeometry"],
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -96,22 +98,34 @@ class X11Driver(Driver):
             if result.returncode != 0:
                 return None
             
-            geom = {}
-            for line in result.stdout.split("\n"):
-                if line.startswith("X="):
-                    geom["x"] = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    geom["y"] = int(line.split("=")[1])
-                elif line.startswith("W="):
-                    geom["width"] = int(line.split("=")[1])
-                elif line.startswith("H="):
-                    geom["height"] = int(line.split("=")[1])
-            
+            fields = dict(
+                line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            )
+            keys = {"X": "x", "Y": "y", "WIDTH": "width", "HEIGHT": "height"}
+            geom = {name: int(fields[key]) for key, name in keys.items() if key in fields}
+            pid = self._get_window_pid(window_id)
+            if geom and pid:
+                geom["pid"] = pid
+
             return geom if geom else None
             
         except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
             return None
     
+    def _get_window_pid(self, window_id: int) -> int:
+        """Get the PID that owns a window (0 if unknown)."""
+        try:
+            result = subprocess.run(
+                ["xdotool", "getwindowpid", str(window_id)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            out = result.stdout.strip()
+            return int(out) if result.returncode == 0 and out.isdigit() else 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return 0
+
     def _get_window_name(self, window_id: int) -> Optional[str]:
         """Get window name."""
         try:
@@ -251,78 +265,51 @@ class X11Driver(Driver):
             return False
     
     def scroll(self, direction: str, amount: int, element: Element) -> bool:
-        """Scroll in an element."""
+        """Scroll over an element with mouse-wheel clicks (X11 buttons 4-7)."""
+        button = {"up": "4", "down": "5", "left": "6", "right": "7"}.get(direction)
+        if button is None:
+            return False
         try:
-            # Move to element first
-            subprocess.run(
+            result = subprocess.run(
                 ["xdotool", "mousemove",
                  str(element.x + element.width // 2),
-                 str(element.y + element.height // 2)],
+                 str(element.y + element.height // 2),
+                 "click", "--repeat", str(max(1, amount)), button],
                 capture_output=True,
-                timeout=5
+                timeout=10
             )
-            
-            # Scroll
-            if direction == "up":
-                args = ["xdotool", "key", "ctrl+up"]
-            elif direction == "down":
-                args = ["xdotool", "key", "ctrl+down"]
-            elif direction == "left":
-                args = ["xdotool", "key", "ctrl+left"]
-            else:  # right
-                args = ["xdotool", "key", "ctrl+right"]
-            
-            for _ in range(max(1, amount // 100)):
-                subprocess.run(args, capture_output=True, timeout=5)
-            
-            return True
+            return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
     
-    def screenshot_window(self, window_id: int) -> str:
-        """Take screenshot of window."""
-        temp_dir = Path(tempfile.gettempdir()) / f"linux-computer-use-{window_id}"
-        temp_dir.mkdir(exist_ok=True)
-        
-        filepath = temp_dir / f"window_{window_id}.png"
-        
+    def _scrot(self, name: str) -> str:
+        """Capture the screen with scrot into a fresh file in a private temp dir.
+
+        scrot never overwrites: if the target exists it saves under a new name
+        (``name_000.png``), so every capture must use a path that does not exist yet.
+        """
+        if self._shot_dir is None:
+            self._shot_dir = Path(tempfile.mkdtemp(prefix="linux-computer-use-"))
+        self._shot_count += 1
+        filepath = self._shot_dir / f"{name}_{self._shot_count}.png"
         try:
-            # Use scrot for screenshot
             result = subprocess.run(
                 ["scrot", str(filepath)],
                 capture_output=True,
                 timeout=10
             )
-            
-            if result.returncode == 0 and filepath.exists():
-                return str(filepath)
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        
-        return ""
-    
+            return ""
+        return str(filepath) if result.returncode == 0 and filepath.exists() else ""
+
+    def screenshot_window(self, window_id: int) -> str:
+        """Take screenshot of the screen (callers crop to the window geometry)."""
+        return self._scrot(f"window_{window_id}")
+
     def screenshot_desktop(self, region: Optional[Tuple[int, int, int, int]] = None) -> str:
         """Take screenshot of desktop."""
-        temp_dir = Path(tempfile.gettempdir()) / "linux-computer-use-desktop"
-        temp_dir.mkdir(exist_ok=True)
-        
-        filepath = temp_dir / "desktop.png"
-        
-        try:
-            # Use scrot for screenshot
-            result = subprocess.run(
-                ["scrot", str(filepath)],
-                capture_output=True,
-                timeout=10
-            )
-            
-            if result.returncode == 0 and filepath.exists():
-                return str(filepath)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        
-        return ""
-    
+        return self._scrot("desktop")
+
     def get_focused_window(self) -> Optional[int]:
         """Get the currently focused window."""
         try:
@@ -341,13 +328,21 @@ class X11Driver(Driver):
         return None
     
     def focus_window(self, window_id: int) -> bool:
-        """Focus a window."""
-        try:
-            result = subprocess.run(
-                ["xdotool", "windowactivate", str(window_id)],
-                capture_output=True,
-                timeout=5
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return False
+        """Focus a window.
+
+        Tries ``windowactivate`` (asks the window manager, raises the window)
+        and falls back to ``windowfocus`` (sets X input focus directly), which
+        also works when no EWMH window manager is running.
+        """
+        for command in ("windowactivate", "windowfocus"):
+            try:
+                result = subprocess.run(
+                    ["xdotool", command, "--sync", str(window_id)],
+                    capture_output=True,
+                    timeout=5
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+            if result.returncode == 0:
+                return True
+        return False

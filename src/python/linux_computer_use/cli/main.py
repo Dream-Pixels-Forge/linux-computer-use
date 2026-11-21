@@ -2,15 +2,14 @@
 """CLI interface for linux_computer_use."""
 
 import argparse
-import asyncio
 import json
 import sys
 from pathlib import Path
 
+from linux_computer_use import __version__
+
 try:
-    from mcp.server.stdio import stdio_server
-    from mcp.server.models import InitializeOptions
-    from linux_computer_use.mcp.server import mcp
+    from linux_computer_use.mcp.server import main as run_mcp_server
     MCP_AVAILABLE = True
 except ImportError:
     MCP_AVAILABLE = False
@@ -69,22 +68,14 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def start_mcp_server(port: int | None = None):
-    """Start the MCP server."""
+def start_mcp_server(port: int | None = None) -> None:
+    """Start the MCP server over stdio."""
     if not MCP_AVAILABLE:
-        print("MCP not available. Install with: pip install memorius[mcp]")
+        print("MCP not available. Install with: pip install 'mcp>=2,<3'", file=sys.stderr)
         sys.exit(1)
-    
-    async with stdio_server() as (read_stream, write_stream):
-        await mcp.run_instance(
-            read_stream,
-            write_stream,
-            InitializeOptions(
-                server_name="linux-computer-use",
-                server_version="0.1.0",
-                capabilities={"tools": {}}
-            )
-        )
+    if port is not None:
+        print("--port is not supported yet; using stdio.", file=sys.stderr)
+    run_mcp_server()
 
 
 def main():
@@ -97,13 +88,13 @@ def main():
         return 0
     
     if args.command == "start":
-        asyncio.run(start_mcp_server(args.port))
+        start_mcp_server(args.port)
         return 0
     
     if args.command == "status":
         print("linux_computer_use server status:")
         print("  MCP: available" if MCP_AVAILABLE else "  MCP: not available")
-        print(f"  Version: 0.1.0")
+        print(f"  Version: {__version__}")
         return 0
     
     if args.command == "list-windows":

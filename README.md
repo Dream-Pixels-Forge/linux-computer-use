@@ -93,14 +93,14 @@ Step 5: Verify result
 |------|-------------|---------|
 | `list_apps()` | List discoverable applications | App list with metadata |
 | `list_windows()` | List open windows | Window list with state |
-| `get_app_info(app_id)` | Get app details | Process info, version |
+| `get_app_info(window_id)` | Get details of the app owning a window | App id, name, PID, sibling windows |
 
 ### Interaction Tools
 
 | Tool | Description | Returns |
 |------|-------------|---------|
 | `click(element, window_id)` | Click element by index/token | `{ effect: "confirmed" \| "failed" }` |
-| `click(coordinate, window_id)` | Click at coordinates | `{ effect: "..." }` |
+| `click(window_id, x, y)` | Click at screen coordinates | `{ effect: "..." }` |
 | `type_text(text, element, window_id)` | Type into input field | Verification result |
 | `press_key(keys, window_id)` | Keyboard shortcuts | Action result |
 | `scroll(direction, amount, element, window_id)` | Scroll container | Scroll result |
@@ -109,9 +109,9 @@ Step 5: Verify result
 
 | Tool | Description | Returns |
 |------|-------------|---------|
-| `screenshot_desktop(region?)` | Full or region screenshot | PNG path + base64 |
-| `screenshot_window(window_id)` | Window screenshot | PNG path + base64 |
-| `screenshot_element(element, window_id)` | Element screenshot | PNG path + base64 |
+| `screenshot_desktop(x?, y?, width?, height?)` | Full or region screenshot | PNG image + path |
+| `screenshot_window(window_id)` | Window screenshot | PNG image + path |
+| `screenshot_element(element, window_id)` | Element screenshot | PNG image + path |
 
 ## AI Agent Integrations
 
