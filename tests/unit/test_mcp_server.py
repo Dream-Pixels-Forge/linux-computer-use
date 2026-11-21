@@ -27,6 +27,9 @@ class FakeDriver:
     def __init__(self, screenshot: Path) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.screenshot = screenshot
+        self.elements = [Element(**vars(e)) for e in ELEMENTS]
+        self.sensitive = False
+        self.focused: int | None = 42
 
     def connect(self) -> bool:
         return True
@@ -35,7 +38,11 @@ class FakeDriver:
         return [WINDOW]
 
     def get_window_state(self, window_id: int) -> WindowState:
-        return WindowState(window_id, 1000, "", "- [window] Notes", list(ELEMENTS))
+        return WindowState(
+            window_id, 1000, "", "- [0] window Notes", list(self.elements), source="atspi",
+            sensitive=self.sensitive,
+            sensitive_reasons=["password field [2]"] if self.sensitive else [],
+        )
 
     def click(self, element: Element) -> bool:
         self.calls.append(("click", element.index))
@@ -57,6 +64,9 @@ class FakeDriver:
         self.calls.append(("scroll", direction, amount, element.index))
         return True
 
+    def get_focused_window(self) -> int | None:
+        return self.focused
+
     def focus_window(self, window_id: int) -> bool:
         self.calls.append(("focus", window_id))
         return True
@@ -71,8 +81,10 @@ def driver(tmp_path: Path):
     PILImage.new("RGB", (1920, 1080), "white").save(shot)
     fake = FakeDriver(shot)
     set_driver(fake)
+    server._snapshots.clear()
     yield fake
     set_driver(None)
+    server._snapshots.clear()
 
 
 async def call(name: str, args: dict[str, Any] | None = None):
@@ -130,15 +142,25 @@ async def test_get_app_info(driver):
     assert data["pid"] == 1000
 
 
+async def read(window_id: int = 42) -> dict[str, Any]:
+    return structured(await call("get_window_state", {"window_id": window_id}))
+
+
 async def test_click_element(driver):
+    await read()
     data = structured(await call("click", {"window_id": 42, "element": 1}))
     assert data["effect"] == "confirmed"
     assert driver.calls == [("click", 1)]
 
 
 async def test_click_coordinate(driver):
-    structured(await call("click", {"window_id": 42, "x": 5, "y": 6}))
-    assert driver.calls == [("click_coordinate", 5, 6)]
+    structured(await call("click", {"window_id": 42, "x": 105, "y": 56}))
+    assert driver.calls == [("click_coordinate", 105, 56)]
+
+
+async def test_click_coordinate_outside_window(driver):
+    assert "outside window 42" in error_text(await call("click", {"window_id": 42, "x": 5, "y": 6}))
+    assert driver.calls == []
 
 
 async def test_click_requires_target(driver):
@@ -147,7 +169,61 @@ async def test_click_requires_target(driver):
 
 
 async def test_click_unknown_element(driver):
-    assert "Element 9 not found" in error_text(await call("click", {"window_id": 42, "element": 9}))
+    await read()
+    assert "Element 9 was not in" in error_text(await call("click", {"window_id": 42, "element": 9}))
+
+
+async def test_element_actions_require_a_snapshot(driver):
+    assert "Call get_window_state(42) first" in error_text(
+        await call("click", {"window_id": 42, "element": 1})
+    )
+    assert driver.calls == []
+
+
+async def test_stale_element_is_refused(driver):
+    await read()
+    driver.elements[1] = Element(index=1, role="button", name="Delete all", window_id=42)
+    message = error_text(await call("click", {"window_id": 42, "element": 1}))
+    assert 'was button "Save", now button "Delete all"' in message
+    assert driver.calls == []
+
+
+async def test_removed_element_is_refused(driver):
+    await read()
+    driver.elements = driver.elements[:1]
+    assert "now gone" in error_text(await call("click", {"window_id": 42, "element": 1}))
+
+
+async def test_get_window_state_reports_source_and_sensitivity(driver):
+    data = await read()
+    assert data["source"] == "atspi"
+    assert data["sensitive"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("click", {"window_id": 42, "element": 1}),
+        ("click", {"window_id": 42, "x": 105, "y": 56}),
+        ("type_text", {"text": "hunter2", "window_id": 42}),
+        ("type_text", {"text": "hunter2", "window_id": 42, "element": 1}),
+        ("press_key", {"keys": "Return", "window_id": 42}),
+        ("press_key", {"keys": "Return"}),  # focused window is checked too
+        ("scroll", {"direction": "down", "window_id": 42}),
+    ],
+)
+async def test_sensitive_windows_refuse_input(driver, tool, args):
+    await read()
+    driver.sensitive = True
+    assert "password field" in error_text(await call(tool, args))
+    assert driver.calls == []
+
+
+async def test_sensitive_window_can_still_be_read(driver):
+    driver.sensitive = True
+    data = await read()
+    assert data["sensitive"] is True
+    assert data["sensitive_reasons"] == ["password field [2]"]
 
 
 async def test_unknown_window(driver):
@@ -193,6 +269,7 @@ async def test_screenshot_window_is_cropped(driver):
 
 
 async def test_screenshot_element_is_cropped(driver):
+    await read()
     result = await call("screenshot_element", {"window_id": 42, "element": 1})
     path = json.loads(result.content[1].text)["path"]
     with PILImage.open(path) as img:

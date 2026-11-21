@@ -3,7 +3,9 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
+from linux_computer_use.drivers.atspi import ATSPIDriver
 from linux_computer_use.drivers.base import Driver, Element, Window, WindowState
 
 
@@ -16,6 +18,10 @@ class X11Driver(Driver):
         self._connected = False
         self._shot_dir: Path | None = None
         self._shot_count = 0
+        self.atspi = ATSPIDriver()
+        # Accessibles from the most recent tree read, keyed by (window_id, index),
+        # so actions can use AT-SPI on exactly the element the caller saw.
+        self._accessibles: dict[tuple[int, int], Any] = {}
 
     def connect(self) -> bool:
         """Connect to X11 server."""
@@ -140,123 +146,125 @@ class X11Driver(Driver):
             return None
 
     def get_window_state(self, window_id: int) -> WindowState:
-        """Get detailed state of a window."""
+        """Read a window's element tree.
+
+        Uses the AT-SPI accessibility tree when the app publishes one, and
+        falls back to a single element for the window itself.
+        """
         if not self._connected:
             self.connect()
 
-        # Get geometry
-        geom = self._get_window_geometry(window_id)
-
-        # Get screenshot path
-        screenshot_path = self.screenshot_window(window_id)
-
-        # Build element tree (simplified for X11)
-        elements = self._build_element_tree(window_id)
-        tree_markdown = self._build_tree_markdown(elements)
-
-        return WindowState(
-            window_id=window_id,
-            pid=geom.get("pid", 0) if geom else 0,
-            screenshot_path=screenshot_path,
-            tree_markdown=tree_markdown,
-            elements=elements
+        geom = self._get_window_geometry(window_id) or {}
+        pid = geom.get("pid", 0)
+        title = self._get_window_name(window_id) or ""
+        rect = (
+            (geom["x"], geom["y"], geom["width"], geom["height"])
+            if {"x", "y", "width", "height"} <= geom.keys()
+            else None
         )
 
-    def _build_element_tree(self, window_id: int) -> list[Element]:
-        """Build element tree from window."""
+        for key in [k for k in self._accessibles if k[0] == window_id]:
+            del self._accessibles[key]
+
+        root = self.atspi.find_window(pid, title, rect)
+        if root is not None:
+            tree = self.atspi.read_tree(root, window_id)
+            if tree.elements:
+                for element, accessible in zip(tree.elements, tree.accessibles, strict=True):
+                    self._accessibles[(window_id, element.index)] = accessible
+                return WindowState(
+                    window_id=window_id,
+                    pid=pid,
+                    screenshot_path="",
+                    tree_markdown=tree.to_markdown(),
+                    elements=tree.elements,
+                    source="atspi",
+                    sensitive=tree.sensitive,
+                    sensitive_reasons=tree.sensitive_reasons,
+                    truncated=tree.truncated,
+                )
+
         elements = []
-
-        # For X11, we create a simplified tree
-        # In production, this would integrate with AT-SPI
-        geom = self._get_window_geometry(window_id)
-
-        if geom:
-            # Root window element
+        if rect is not None:
             elements.append(Element(
-                index=0,
-                role="window",
-                name=self._get_window_name(window_id) or "Window",
-                x=geom.get("x", 0),
-                y=geom.get("y", 0),
-                width=geom.get("width", 0),
-                height=geom.get("height", 0),
-                window_id=window_id
+                index=0, role="window", name=title or "Window",
+                x=rect[0], y=rect[1], width=rect[2], height=rect[3],
+                window_id=window_id,
             ))
-
-        return elements
-
-    def _build_tree_markdown(self, elements: list[Element]) -> str:
-        """Build markdown representation of element tree."""
-        if not elements:
-            return "No elements found"
-
-        lines = ["# Element Tree", ""]
-        for elem in elements:
-            indent = "\t" * (len(elem.children) if elem.parent_index >= 0 else 0)
-            lines.append(f"{indent}- [{elem.role}] {elem.name}")
-            if elem.state:
-                lines.append(f"{indent}  States: {', '.join(elem.state)}")
-
-        return "\n".join(lines)
+        markdown = (
+            f'- [0] window "{title}"\n'
+            "(No accessibility tree: the app does not publish one over AT-SPI, "
+            "or AT-SPI is unavailable. Use coordinates and screenshots.)"
+            if elements else "No elements found"
+        )
+        return WindowState(
+            window_id=window_id,
+            pid=pid,
+            screenshot_path="",
+            tree_markdown=markdown,
+            elements=elements,
+            source="x11",
+        )
 
     def click(self, element: Element) -> bool:
-        """Click on an element by coordinates."""
-        try:
-            subprocess.run(
-                ["xdotool", "mousemove",
-                 str(element.x + element.width // 2),
-                 str(element.y + element.height // 2),
-                 "click", "1"],
-                capture_output=True,
-                timeout=5
-            )
+        """Click an element.
+
+        Prefers the element's accessible click/press action (works even when
+        the element is covered), otherwise clicks the centre of its bounds.
+        """
+        accessible = self._accessibles.get((element.window_id, element.index))
+        if accessible is not None and self.atspi.do_click_action(accessible):
             return True
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        if element.width <= 0 or element.height <= 0:
             return False
+        return self.click_coordinate(
+            element.x + element.width // 2, element.y + element.height // 2
+        )
 
     def click_coordinate(self, x: int, y: int) -> bool:
         """Click at specific coordinates."""
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["xdotool", "mousemove", str(x), str(y), "click", "1"],
                 capture_output=True,
                 timeout=5
             )
-            return True
+            return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
     def type_text(self, text: str, element: Element) -> bool:
-        """Type text into an element."""
-        try:
-            # Move to element first
-            subprocess.run(
-                ["xdotool", "mousemove",
-                 str(element.x + element.width // 2),
-                 str(element.y + element.height // 2)],
-                capture_output=True,
-                timeout=5
-            )
+        """Focus an element, then type text into it.
 
-            # Type the text
-            subprocess.run(
-                ["xdotool", "type", "--delay", "0", text],
+        Index 0 is the window itself: typing goes to whatever has focus there.
+        """
+        if element.index != 0:
+            accessible = self._accessibles.get((element.window_id, element.index))
+            focused = accessible is not None and self.atspi.grab_focus(accessible)
+            if not focused and not self.click(element):
+                return False
+        try:
+            result = subprocess.run(
+                ["xdotool", "type", "--delay", "0", "--", text],
                 capture_output=True,
-                timeout=10
+                timeout=30
             )
-            return True
+            return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
     def press_key(self, keys: str, element: Element | None = None) -> bool:
-        """Press a keyboard key or key combination."""
+        """Press keys in xdotool syntax; space-separated keys are pressed in order."""
+        sequence = keys.split()
+        if not sequence:
+            return False
         try:
-            subprocess.run(
-                ["xdotool", "key", keys],
+            result = subprocess.run(
+                ["xdotool", "key", "--", *sequence],
                 capture_output=True,
                 timeout=5
             )
-            return True
+            return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 

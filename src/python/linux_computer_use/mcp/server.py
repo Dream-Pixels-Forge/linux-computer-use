@@ -41,6 +41,7 @@ class DesktopDriver(Protocol):
     def press_key(self, keys: str, element: Element | None = None) -> bool: ...
     def scroll(self, direction: str, amount: int, element: Element) -> bool: ...
     def focus_window(self, window_id: int) -> bool: ...
+    def get_focused_window(self) -> int | None: ...
     def screenshot_desktop(self, region: tuple[int, int, int, int] | None = None) -> str: ...
 
 
@@ -85,15 +86,67 @@ def _find_window(driver: DesktopDriver, window_id: int) -> Window:
     raise ToolError(f"Window {window_id} not found. Call list_windows for valid ids.")
 
 
-def _find_element(driver: DesktopDriver, window_id: int, index: int) -> Element:
+# What each window looked like when the client last read it:
+# window_id -> {index: (role, name)}. Element indexes are only meaningful
+# relative to such a snapshot.
+_snapshots: dict[int, dict[int, tuple[str, str]]] = {}
+
+
+def _remember(state: WindowState) -> None:
+    _snapshots[state.window_id] = {e.index: (e.role, e.name) for e in state.elements}
+
+
+def _refuse_if_sensitive(state: WindowState) -> None:
+    if state.sensitive:
+        reasons = ", ".join(state.sensitive_reasons) or "sensitive input"
+        raise ToolError(
+            f"Window {state.window_id} contains a {reasons}. linux-computer-use does not "
+            "interact with windows that ask for secrets; ask the user to complete this step."
+        )
+
+
+def _window_state(driver: DesktopDriver, window_id: int, *, acting: bool) -> WindowState:
+    _find_window(driver, window_id)
     state = driver.get_window_state(window_id)
-    for element in state.elements:
-        if element.index == index:
-            return element
-    raise ToolError(
-        f"Element {index} not found in window {window_id}. "
-        "Call get_window_state for a fresh element list."
-    )
+    if acting:
+        _refuse_if_sensitive(state)
+    return state
+
+
+def _find_element(
+    driver: DesktopDriver, window_id: int, index: int, *, acting: bool = True
+) -> Element:
+    """Resolve an element index against a fresh tree, refusing stale targets.
+
+    Index 0 (the window itself) is always valid. Any other index must come
+    from a get_window_state call, and the element at that index must still
+    have the same role and name, so a UI change can't redirect an action
+    to a different control.
+    """
+    state = _window_state(driver, window_id, acting=acting)
+    element = next((e for e in state.elements if e.index == index), None)
+    if index != 0:
+        seen = _snapshots.get(window_id)
+        if seen is None:
+            raise ToolError(
+                f"Call get_window_state({window_id}) first; element indexes come from it."
+            )
+        expected = seen.get(index)
+        actual = (element.role, element.name) if element else None
+        if expected is None:
+            raise ToolError(f"Element {index} was not in the last get_window_state result.")
+        if actual != expected:
+            now = f'{actual[0]} "{actual[1]}"' if actual else "gone"
+            raise ToolError(
+                f'Element {index} changed since get_window_state (was {expected[0]} '
+                f'"{expected[1]}", now {now}). Call get_window_state again.'
+            )
+    if element is None:
+        raise ToolError(
+            f"Element {index} not found in window {window_id}. "
+            "Call get_window_state for a fresh element list."
+        )
+    return element
 
 
 def _audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -198,8 +251,14 @@ def list_windows() -> dict[str, Any]:
 
 @mcp.tool()
 def get_window_state(window_id: int) -> dict[str, Any]:
-    """Get a window's element tree. Element indexes are used by click, type_text and scroll."""
-    state = get_driver().get_window_state(window_id)
+    """Get a window's element tree (buttons, fields, menus... via AT-SPI).
+
+    Element indexes from this result are what click, type_text, scroll and
+    screenshot_element take. Call it again after the UI changes.
+    """
+    driver = get_driver()
+    state = _window_state(driver, window_id, acting=False)
+    _remember(state)
     return _audit(
         "get_window_state",
         {"window_id": window_id},
@@ -207,6 +266,10 @@ def get_window_state(window_id: int) -> dict[str, Any]:
             "effect": "success",
             "window_id": state.window_id,
             "pid": state.pid,
+            "source": state.source,
+            "sensitive": state.sensitive,
+            "sensitive_reasons": state.sensitive_reasons,
+            "truncated": state.truncated,
             "tree_markdown": state.tree_markdown,
             "elements": [e.to_dict() for e in state.elements],
         },
@@ -254,7 +317,10 @@ def click(
             raise ToolError("Give either element or x/y, not both.")
         success = driver.click(_find_element(driver, window_id, element))
     elif x is not None and y is not None:
-        _find_window(driver, window_id)
+        window = _find_window(driver, window_id)
+        if not (window.x <= x < window.x + window.width and window.y <= y < window.y + window.height):
+            raise ToolError(f"Point ({x}, {y}) is outside window {window_id}.")
+        _window_state(driver, window_id, acting=True)
         success = driver.click_coordinate(x, y)
     else:
         raise ToolError("Give an element index, or both x and y.")
@@ -273,10 +339,9 @@ def type_text(text: str, window_id: int, element: int | None = None) -> dict[str
     if element is not None:
         target = _find_element(driver, window_id, element)
     else:
-        _find_window(driver, window_id)
+        target = _find_element(driver, window_id, 0)
         if not driver.focus_window(window_id):
             raise ToolError(f"Could not focus window {window_id}.")
-        target = _find_element(driver, window_id, 0)
     success = driver.type_text(text, target)
     return _audit(
         "type_text",
@@ -297,9 +362,13 @@ def press_key(keys: str, window_id: int | None = None) -> dict[str, Any]:
     """
     driver = get_driver()
     if window_id is not None:
-        _find_window(driver, window_id)
+        _window_state(driver, window_id, acting=True)
         if not driver.focus_window(window_id):
             raise ToolError(f"Could not focus window {window_id}.")
+    else:
+        focused = driver.get_focused_window()
+        if focused is not None:
+            _refuse_if_sensitive(driver.get_window_state(focused))
     success = driver.press_key(keys)
     return _audit(
         "press_key",
@@ -366,7 +435,7 @@ def screenshot_window(window_id: int) -> list[Any]:
 def screenshot_element(window_id: int, element: int) -> list[Any]:
     """Screenshot a single UI element."""
     driver = get_driver()
-    e = _find_element(driver, window_id, element)
+    e = _find_element(driver, window_id, element, acting=False)
     path = _capture(driver, (e.x, e.y, e.width, e.height), f"element_{window_id}_{element}")
     return _image_result("screenshot_element", {"window_id": window_id, "element": element}, path)
 

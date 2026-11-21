@@ -71,10 +71,13 @@ class AgentIntegrationBase(ABC):
                     "type": "object",
                     "properties": {
                         "element": {"type": "integer"},
-                        "element_token": {"type": "string"},
-                        "coordinate": {"type": "object"},
+                        "coordinate": {
+                            "type": "object",
+                            "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                        },
                         "window_id": {"type": "integer"}
-                    }
+                    },
+                    "required": ["window_id"]
                 }
             },
             {
@@ -87,7 +90,7 @@ class AgentIntegrationBase(ABC):
                         "element": {"type": "integer"},
                         "window_id": {"type": "integer"}
                     },
-                    "required": ["text"]
+                    "required": ["text", "window_id"]
                 }
             },
             {
@@ -110,56 +113,85 @@ class AgentIntegrationBase(ABC):
 
 
 class MCPToolProxy:
-    """Proxy for MCP tools that can be used by any agent."""
+    """In-process access to the MCP server's tools for agent integrations.
+
+    Calls the same tool functions the MCP server exposes, so adapters get the
+    same checks (stale elements, sensitive windows) and real results. Tool
+    errors come back as ``{"error": "..."}``.
+    """
 
     def __init__(self) -> None:
-        from linux_computer_use.drivers.x11 import X11Driver
         from linux_computer_use.session import get_active_session
-        self.driver = X11Driver()
+
         self.session = get_active_session()
+
+    @staticmethod
+    def _run(fn: Any, **kwargs: Any) -> dict[str, Any]:
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        try:
+            result: dict[str, Any] = fn(**kwargs)
+        except ToolError as exc:
+            return {"error": str(exc)}
+        return result
 
     async def list_windows(self) -> dict[str, Any]:
         """List all open windows."""
-        windows = self.driver.list_windows()
-        return {
-            "windows": [w.to_dict() for w in windows]
-        }
+        from linux_computer_use.mcp import server
+
+        return self._run(server.list_windows)
+
+    async def get_window_state(self, window_id: int) -> dict[str, Any]:
+        """Get a window's element tree."""
+        from linux_computer_use.mcp import server
+
+        return self._run(server.get_window_state, window_id=window_id)
 
     async def click(self, element: int | None = None,
                     coordinate: dict[str, Any] | None = None,
                     window_id: int | None = None,
                     element_token: str | None = None) -> dict[str, Any]:
-        """Click on an element or coordinate."""
-        # Implementation would use the driver
-        return {"effect": "confirmed"}
+        """Click an element by index, or at coordinate {"x": .., "y": ..}."""
+        from linux_computer_use.mcp import server
+
+        if element_token is not None:
+            return {"error": "element_token is not supported; use element and window_id"}
+        if window_id is None:
+            return {"error": "window_id is required"}
+        x = y = None
+        if coordinate is not None:
+            x, y = int(coordinate["x"]), int(coordinate["y"])
+        return self._run(server.click, window_id=window_id, element=element, x=x, y=y)
 
     async def type_text(self, text: str,
                         element: int | None = None,
                         window_id: int | None = None,
                         element_token: str | None = None) -> dict[str, Any]:
-        """Type text into an element."""
-        return {"effect": "confirmed", "characters_typed": len(text)}
+        """Type text into an element, or into the focused part of the window."""
+        from linux_computer_use.mcp import server
 
-    async def get_window_state(self, window_id: int) -> dict[str, Any]:
-        """Get window state."""
-        state = self.driver.get_window_state(window_id)
-        return {
-            "window_id": state.window_id,
-            "screenshot_path": state.screenshot_path,
-            "tree_markdown": state.tree_markdown,
-            "elements": [e.to_dict() for e in state.elements]
-        }
+        if element_token is not None:
+            return {"error": "element_token is not supported; use element and window_id"}
+        if window_id is None:
+            return {"error": "window_id is required"}
+        return self._run(server.type_text, text=text, window_id=window_id, element=element)
 
     async def screenshot_window(self, window_id: int) -> dict[str, Any]:
-        """Take window screenshot."""
+        """Screenshot a window, as a PNG path plus base64 data."""
         import base64
+        import json
         from pathlib import Path
 
-        filepath = self.driver.screenshot_window(window_id)
-        return {
-            "path": filepath,
-            "base64": base64.b64encode(Path(filepath).read_bytes()).decode() if filepath else "",
-        }
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from linux_computer_use.mcp import server
+
+        try:
+            _image, meta = server.screenshot_window(window_id=window_id)
+        except ToolError as exc:
+            return {"error": str(exc)}
+        path = json.loads(meta)["path"]
+        return {"path": path, "base64": base64.b64encode(Path(path).read_bytes()).decode()}
 
 
 # Convenience function to get tool proxy

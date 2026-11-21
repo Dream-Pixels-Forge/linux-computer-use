@@ -22,6 +22,9 @@ class Element:
     automation_id: str = ""
     class_name: str = ""
     window_id: int = 0
+    actions: list[str] = field(default_factory=list)
+    #: Current text of editable fields (never read for password fields).
+    value: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -41,7 +44,9 @@ class Element:
             "children": self.children,
             "automation_id": self.automation_id,
             "class_name": self.class_name,
-            "window_id": self.window_id
+            "window_id": self.window_id,
+            "actions": self.actions,
+            "value": self.value,
         }
 
 
@@ -88,6 +93,13 @@ class WindowState:
     tree_markdown: str
     elements: list[Element]
     raw_tree: dict[str, Any] | None = None
+    #: "atspi" when the tree came from the accessibility bus, "x11" for the
+    #: window-outline fallback.
+    source: str = "x11"
+    #: True when the window contains a password field or similar secret input.
+    sensitive: bool = False
+    sensitive_reasons: list[str] = field(default_factory=list)
+    truncated: bool = False
 
 
 class Driver(ABC):

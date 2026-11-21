@@ -95,6 +95,37 @@ Step 5: Verify result
 | `list_windows()` | List open windows | Window list with state |
 | `get_app_info(window_id)` | Get details of the app owning a window | App id, name, PID, sibling windows |
 
+### Element Trees and Safety
+
+`get_window_state` returns the window's accessibility tree from **AT-SPI**, the
+Linux accessibility bus that GTK, Qt, Firefox, Chromium and LibreOffice publish
+to. Each element has an index, role, name, states, actions and bounds, and
+editable fields include their current `value`:
+
+```
+- [0] frame "LCU Demo"
+  - [1] filler
+    - [2] label "Clicks: 0"
+    - [3] text (activate) = 'Ada' {focusable, editable}
+    - [4] check box "Subscribe" (click) {focusable, checked}
+    - [5] push button "Count" (click) {focusable}
+```
+
+- **AT-SPI is optional.** Install the `atspi` extra (`pip install -e ".[atspi]"`,
+  plus `gir1.2-atspi-2.0` and `at-spi2-core` on Debian/Ubuntu). Without it, or
+  for apps that don't publish a tree (e.g. xterm), the tree is just the window
+  (`source: "x11"`); use coordinates and screenshots.
+- **Clicks use the element's accessible action** (`click`/`press`/`toggle`) when
+  it has one, which works even if the element is covered. Otherwise the centre
+  of its bounds is clicked.
+- **Read before you act.** Element indexes come from the last `get_window_state`
+  for that window. If the element at an index has since changed role or name,
+  the action is refused with `changed since get_window_state` instead of
+  hitting a different control.
+- **Windows with password fields are read-only.** `click`, `type_text`,
+  `press_key` and `scroll` refuse to act on them (and `press_key` with no
+  `window_id` checks the focused window). Password field contents are never read.
+
 ### Interaction Tools
 
 | Tool | Description | Returns |
@@ -250,9 +281,11 @@ sudo apt-get install -y gnome-calculator firefox gedit libreoffice
 # Unit tests
 pytest tests/unit/ -v
 
-# Integration tests: drive a real X display (needs xdotool, scrot, xterm)
-sudo apt-get install -y xvfb xdotool scrot xterm
-xvfb-run -a pytest tests/integration/ -v
+# Integration tests: drive real windows on a virtual X display
+sudo apt-get install -y xvfb xdotool scrot xterm dbus-x11 at-spi2-core \
+  libatk-adaptor gir1.2-atspi-2.0 python3-gi gir1.2-gtk-3.0
+pip install -e ".[dev,atspi]"
+dbus-run-session -- xvfb-run -a pytest tests/integration/ -v
 ```
 
 ### Code Quality
