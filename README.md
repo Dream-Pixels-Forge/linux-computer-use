@@ -31,8 +31,8 @@ pip install -e .
 # Via Python
 python -m linux_computer_use.mcp
 
-# Or with npx
-npx linux-computer-use
+# Or via the CLI entry point
+linux-computer-use start
 ```
 
 ### Using with an AI Agent
@@ -93,14 +93,45 @@ Step 5: Verify result
 |------|-------------|---------|
 | `list_apps()` | List discoverable applications | App list with metadata |
 | `list_windows()` | List open windows | Window list with state |
-| `get_app_info(app_id)` | Get app details | Process info, version |
+| `get_app_info(window_id)` | Get details of the app owning a window | App id, name, PID, sibling windows |
+
+### Element Trees and Safety
+
+`get_window_state` returns the window's accessibility tree from **AT-SPI**, the
+Linux accessibility bus that GTK, Qt, Firefox, Chromium and LibreOffice publish
+to. Each element has an index, role, name, states, actions and bounds, and
+editable fields include their current `value`:
+
+```
+- [0] frame "LCU Demo"
+  - [1] filler
+    - [2] label "Clicks: 0"
+    - [3] text (activate) = 'Ada' {focusable, editable}
+    - [4] check box "Subscribe" (click) {focusable, checked}
+    - [5] push button "Count" (click) {focusable}
+```
+
+- **AT-SPI is optional.** Install the `atspi` extra (`pip install -e ".[atspi]"`,
+  plus `gir1.2-atspi-2.0` and `at-spi2-core` on Debian/Ubuntu). Without it, or
+  for apps that don't publish a tree (e.g. xterm), the tree is just the window
+  (`source: "x11"`); use coordinates and screenshots.
+- **Clicks use the element's accessible action** (`click`/`press`/`toggle`) when
+  it has one, which works even if the element is covered. Otherwise the centre
+  of its bounds is clicked.
+- **Read before you act.** Element indexes come from the last `get_window_state`
+  for that window. If the element at an index has since changed role or name,
+  the action is refused with `changed since get_window_state` instead of
+  hitting a different control.
+- **Windows with password fields are read-only.** `click`, `type_text`,
+  `press_key` and `scroll` refuse to act on them (and `press_key` with no
+  `window_id` checks the focused window). Password field contents are never read.
 
 ### Interaction Tools
 
 | Tool | Description | Returns |
 |------|-------------|---------|
 | `click(element, window_id)` | Click element by index/token | `{ effect: "confirmed" \| "failed" }` |
-| `click(coordinate, window_id)` | Click at coordinates | `{ effect: "..." }` |
+| `click(window_id, x, y)` | Click at screen coordinates | `{ effect: "..." }` |
 | `type_text(text, element, window_id)` | Type into input field | Verification result |
 | `press_key(keys, window_id)` | Keyboard shortcuts | Action result |
 | `scroll(direction, amount, element, window_id)` | Scroll container | Scroll result |
@@ -109,9 +140,9 @@ Step 5: Verify result
 
 | Tool | Description | Returns |
 |------|-------------|---------|
-| `screenshot_desktop(region?)` | Full or region screenshot | PNG path + base64 |
-| `screenshot_window(window_id)` | Window screenshot | PNG path + base64 |
-| `screenshot_element(element, window_id)` | Element screenshot | PNG path + base64 |
+| `screenshot_desktop(x?, y?, width?, height?)` | Full or region screenshot | PNG image + path |
+| `screenshot_window(window_id)` | Window screenshot | PNG image + path |
+| `screenshot_element(element, window_id)` | Element screenshot | PNG image + path |
 
 ## AI Agent Integrations
 
@@ -237,7 +268,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 
-# Node.js setup
+# TypeScript types (optional)
 pnpm install
 
 # Install test apps (Ubuntu/Debian)
@@ -250,26 +281,23 @@ sudo apt-get install -y gnome-calculator firefox gedit libreoffice
 # Unit tests
 pytest tests/unit/ -v
 
-# Integration tests (requires DISPLAY)
-export DISPLAY=:99
-Xvfb :99 -screen 0 1920x1080x24 &
-pytest tests/integration/ -v
-
-# All tests
-pnpm test
+# Integration tests: drive real windows on a virtual X display
+sudo apt-get install -y xvfb xdotool scrot xterm dbus-x11 at-spi2-core \
+  libatk-adaptor gir1.2-atspi-2.0 python3-gi gir1.2-gtk-3.0
+pip install -e ".[dev,atspi]"
+dbus-run-session -- xvfb-run -a pytest tests/integration/ -v
 ```
 
 ### Code Quality
 
 ```bash
-# Python
-mypy src/python/
-ruff check src/python/
-pytest tests/
+# Python (same checks as CI)
+ruff check src/python tests
+mypy src/python
+pytest tests/unit
 
-# TypeScript
-pnpm tsc --noEmit
-pnpm lint
+# TypeScript types
+pnpm typecheck
 pnpm build
 ```
 

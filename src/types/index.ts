@@ -21,6 +21,10 @@ export interface Element {
   automationId?: string;
   className?: string;
   windowId: number;
+  /** Accessible actions, e.g. "click", "activate". */
+  actions?: string[];
+  /** Current text of editable fields; never set for password fields. */
+  value?: string | null;
 }
 
 export interface Window {
@@ -46,6 +50,12 @@ export interface WindowState {
   treeMarkdown: string;
   elements: Element[];
   rawTree?: Record<string, unknown>;
+  /** "atspi" for a real accessibility tree, "x11" for the window-only fallback. */
+  source?: "atspi" | "x11";
+  /** True when the window has a password field; input tools refuse to act on it. */
+  sensitive?: boolean;
+  sensitiveReasons?: string[];
+  truncated?: boolean;
 }
 
 export interface ScreenshotResult {

@@ -1,494 +1,450 @@
-"""MCP server for linux_computer_use."""
+"""MCP server for linux_computer_use.
 
-import asyncio
-import logging
+Built on the MCP Python SDK v2 high-level server (``MCPServer``, formerly
+``FastMCP``). Tools are registered with decorators and their input schemas are
+generated from the function signatures.
+
+Run it with ``python -m linux_computer_use.mcp`` or ``linux-computer-use start``.
+"""
+
+from __future__ import annotations
+
+import configparser
 import json
-import base64
-from typing import Optional, Dict, Any, Union
+import logging
+import os
 from pathlib import Path
+from typing import Any, Literal, Protocol
 
-try:
-    from mcp.server import Server
-    from mcp.server.models import InitializeOptions
-    from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
-    import json
-    MCP_AVAILABLE = True
-except ImportError:
-    MCP_AVAILABLE = False
-    Server = None
-    InitializeOptions = None
-    stdio_server = None
-    Tool = None
-    TextContent = None
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from PIL import Image as PILImage
 
-from linux_computer_use.session import get_active_session, Session
-from linux_computer_use.drivers.x11 import X11Driver
-from linux_computer_use.drivers.base import Window, Element
+from linux_computer_use import __version__
+from linux_computer_use.drivers.base import Element, Window, WindowState
+from linux_computer_use.session import get_active_session
 
 logger = logging.getLogger(__name__)
 
-# Global driver instance
-_driver: Optional[X11Driver] = None
+SERVER_NAME = "linux-computer-use"
 
 
-def get_driver() -> X11Driver:
-    """Get or create X11 driver instance."""
+class DesktopDriver(Protocol):
+    """The driver surface the MCP server relies on."""
+
+    def connect(self) -> bool: ...
+    def list_windows(self) -> list[Window]: ...
+    def get_window_state(self, window_id: int) -> WindowState: ...
+    def click(self, element: Element) -> bool: ...
+    def click_coordinate(self, x: int, y: int) -> bool: ...
+    def type_text(self, text: str, element: Element) -> bool: ...
+    def press_key(self, keys: str, element: Element | None = None) -> bool: ...
+    def scroll(self, direction: str, amount: int, element: Element) -> bool: ...
+    def focus_window(self, window_id: int) -> bool: ...
+    def get_focused_window(self) -> int | None: ...
+    def screenshot_desktop(self, region: tuple[int, int, int, int] | None = None) -> str: ...
+
+
+# --------------------------------------------------------------------------- #
+# Driver management
+# --------------------------------------------------------------------------- #
+
+_driver: DesktopDriver | None = None
+
+
+def get_driver() -> DesktopDriver:
+    """Return the active driver, creating the X11 driver on first use."""
     global _driver
     if _driver is None:
-        _driver = X11Driver()
-        _driver.connect()
+        from linux_computer_use.drivers.x11 import X11Driver
+
+        driver = X11Driver()
+        if not driver.connect():
+            raise ToolError(
+                "Could not connect to an X11 display. Check that DISPLAY is set "
+                "and that xdotool and scrot are installed."
+            )
+        _driver = driver
     return _driver
 
 
-if MCP_AVAILABLE and Server:
-    mcp = Server("linux-computer-use")
+def set_driver(driver: DesktopDriver | None) -> None:
+    """Replace the active driver (used by tests and alternative backends)."""
+    global _driver
+    _driver = driver
 
-    # Initialize session on server start
-    @mcp.initialize()
-    async def handle_initialize(options: InitializeOptions) -> Dict[str, Any]:
-        """Handle MCP initialize."""
-        session = get_active_session()
-        logger.info(f"Session initialized: {session.id}")
-        return {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {}
-            }
-        }
 
-    # Tools registry
-    @mcp.list_tools()
-    async def handle_list_tools() -> list[Tool]:
-        """List available tools."""
-        return [
-            Tool(
-                name="list_apps",
-                description="List all discoverable desktop applications",
-                inputSchema={}
-            ),
-            Tool(
-                name="list_windows", 
-                description="List all open windows",
-                inputSchema={}
-            ),
-            Tool(
-                name="get_window_state",
-                description="Get detailed state of a window with element tree and screenshot",
-                inputSchema={"type": "object", "properties": {"window_id": {"type": "integer"}}, "required": ["window_id"]}
-            ),
-            Tool(
-                name="get_app_info",
-                description="Get detailed information about a desktop application",
-                inputSchema={"type": "object", "properties": {"app_id": {"type": "string"}, "window_id": {"type": "integer"}}, "required": ["window_id"]}
-            ),
-            Tool(
-                name="click",
-                description="Click on an element by index or at coordinates",
-                inputSchema={
-                    "type": "object",
-                    "oneOf": [
-                        {"properties": {"element": {"type": "integer"}, "window_id": {"type": "integer"}}, "required": ["element", "window_id"]},
-                        {"properties": {"coordinate": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}}, "window_id": {"type": "integer"}}, "required": ["coordinate", "window_id"]}
-                    ]
-                }
-            ),
-            Tool(
-                name="type_text",
-                description="Type text into an element",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "element": {"type": "integer"},
-                        "window_id": {"type": "integer"}
-                    },
-                    "required": ["text", "window_id"]
-                }
-            ),
-            Tool(
-                name="press_key",
-                description="Press a keyboard key or key combination (e.g., 'ctrl+c', 'Enter')",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "keys": {"type": "string"},
-                        "window_id": {"type": "integer"}
-                    },
-                    "required": ["keys"]
-                }
-            ),
-            Tool(
-                name="scroll",
-                description="Scroll within an element",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
-                        "amount": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
-                        "element": {"type": "integer"},
-                        "window_id": {"type": "integer"}
-                    },
-                    "required": ["direction", "window_id"]
-                }
-            ),
-            Tool(
-                name="screenshot_desktop",
-                description="Take a screenshot of the entire desktop",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "region": {
-                            "type": "object",
-                            "properties": {
-                                "x": {"type": "number"},
-                                "y": {"type": "number"},
-                                "width": {"type": "number"},
-                                "height": {"type": "number"}
-                            }
-                        }
-                    }
-                }
-            ),
-            Tool(
-                name="screenshot_window",
-                description="Take a screenshot of a specific window",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "window_id": {"type": "integer"}
-                    },
-                    "required": ["window_id"]
-                }
-            ),
-            Tool(
-                name="screenshot_element",
-                description="Take a screenshot of a specific UI element",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "element": {"type": "integer"},
-                        "window_id": {"type": "integer"}
-                    },
-                    "required": ["element", "window_id"]
-                }
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+
+def _find_window(driver: DesktopDriver, window_id: int) -> Window:
+    for window in driver.list_windows():
+        if window.window_id == window_id:
+            return window
+    raise ToolError(f"Window {window_id} not found. Call list_windows for valid ids.")
+
+
+# What each window looked like when the client last read it:
+# window_id -> {index: (role, name)}. Element indexes are only meaningful
+# relative to such a snapshot.
+_snapshots: dict[int, dict[int, tuple[str, str]]] = {}
+
+
+def _remember(state: WindowState) -> None:
+    _snapshots[state.window_id] = {e.index: (e.role, e.name) for e in state.elements}
+
+
+def _refuse_if_sensitive(state: WindowState) -> None:
+    if state.sensitive:
+        reasons = ", ".join(state.sensitive_reasons) or "sensitive input"
+        raise ToolError(
+            f"Window {state.window_id} contains a {reasons}. linux-computer-use does not "
+            "interact with windows that ask for secrets; ask the user to complete this step."
+        )
+
+
+def _window_state(driver: DesktopDriver, window_id: int, *, acting: bool) -> WindowState:
+    _find_window(driver, window_id)
+    state = driver.get_window_state(window_id)
+    if acting:
+        _refuse_if_sensitive(state)
+    return state
+
+
+def _find_element(
+    driver: DesktopDriver, window_id: int, index: int, *, acting: bool = True
+) -> Element:
+    """Resolve an element index against a fresh tree, refusing stale targets.
+
+    Index 0 (the window itself) is always valid. Any other index must come
+    from a get_window_state call, and the element at that index must still
+    have the same role and name, so a UI change can't redirect an action
+    to a different control.
+    """
+    state = _window_state(driver, window_id, acting=acting)
+    element = next((e for e in state.elements if e.index == index), None)
+    if index != 0:
+        seen = _snapshots.get(window_id)
+        if seen is None:
+            raise ToolError(
+                f"Call get_window_state({window_id}) first; element indexes come from it."
             )
-        ]
+        expected = seen.get(index)
+        actual = (element.role, element.name) if element else None
+        if expected is None:
+            raise ToolError(f"Element {index} was not in the last get_window_state result.")
+        if actual != expected:
+            now = f'{actual[0]} "{actual[1]}"' if actual else "gone"
+            raise ToolError(
+                f'Element {index} changed since get_window_state (was {expected[0]} '
+                f'"{expected[1]}", now {now}). Call get_window_state again.'
+            )
+    if element is None:
+        raise ToolError(
+            f"Element {index} not found in window {window_id}. "
+            "Call get_window_state for a fresh element list."
+        )
+    return element
 
-    # Tool implementations
-    @mcp.tool()
-    async def list_apps() -> str:
-        """List desktop applications."""
-        session = get_active_session()
-        
-        result = {
-            "apps": [
-                {
-                    "id": "org.gnome.Calculator",
-                    "name": "Calculator",
-                    "executable": "/usr/bin/gnome-calculator",
-                    "categories": ["Science", "Utility"],
-                    "running": True
-                },
-                {
-                    "id": "org.gnome.Files",
-                    "name": "Files",
-                    "executable": "/usr/bin/org.gnome.Nautilus",
-                    "categories": ["File"],
-                    "running": True
-                }
-            ]
-        }
-        
-        session.audit_action("list_apps", {}, {"effect": "success"})
-        return json.dumps(result)
 
-    @mcp.tool()
-    async def list_windows() -> str:
-        """List open windows using X11 driver."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        windows = driver.list_windows()
-        
-        result = {
-            "windows": [w.to_dict() for w in windows]
-        }
-        
-        session.audit_action("list_windows", {}, {"effect": "success", "count": len(windows)})
-        return json.dumps(result)
+def _audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    get_active_session().audit_action(tool, args, result)
+    return result
 
-    @mcp.tool()
-    async def get_window_state(window_id: int) -> str:
-        """Get detailed state of a window."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        state = driver.get_window_state(window_id)
-        
-        result = {
+
+def _capture(driver: DesktopDriver, region: tuple[int, int, int, int] | None, name: str) -> Path:
+    """Capture the desktop, optionally cropped to (x, y, width, height)."""
+    source = driver.screenshot_desktop()
+    if not source:
+        raise ToolError("Screenshot failed. Check that scrot is installed.")
+
+    out = get_active_session().temp_dir / f"{name}.png"
+    with PILImage.open(source) as shot:
+        img: PILImage.Image = shot
+        if region is not None:
+            x, y, w, h = region
+            if w <= 0 or h <= 0:
+                raise ToolError(f"Invalid region size {w}x{h}.")
+            left, top = max(0, x), max(0, y)
+            right, bottom = min(img.width, x + w), min(img.height, y + h)
+            if right <= left or bottom <= top:
+                raise ToolError("Region lies outside the screen.")
+            img = img.crop((left, top, right, bottom))
+        img.save(out, format="PNG")
+    return out
+
+
+def _xdg_application_dirs() -> list[Path]:
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    data_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    dirs = [data_home, *data_dirs.split(":")]
+    return [Path(d) / "applications" for d in dirs if d]
+
+
+def discover_apps(dirs: list[Path] | None = None) -> list[dict[str, Any]]:
+    """Read installed applications from XDG .desktop entries."""
+    apps: dict[str, dict[str, Any]] = {}
+    for directory in dirs if dirs is not None else _xdg_application_dirs():
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.desktop")):
+            app_id = path.relative_to(directory).with_suffix("").as_posix().replace("/", "-")
+            if app_id in apps:  # earlier dirs take precedence per the XDG spec
+                continue
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                parser.read(path, encoding="utf-8")
+            except (configparser.Error, UnicodeDecodeError):
+                continue
+            if not parser.has_section("Desktop Entry"):
+                continue
+            entry = parser["Desktop Entry"]
+            if entry.get("Type", "Application") != "Application":
+                continue
+            if entry.get("NoDisplay", "false").lower() == "true":
+                continue
+            if entry.get("Hidden", "false").lower() == "true":
+                continue
+            apps[app_id] = {
+                "id": app_id,
+                "name": entry.get("Name", app_id),
+                "exec": entry.get("Exec", ""),
+                "categories": [c for c in entry.get("Categories", "").split(";") if c],
+            }
+    return sorted(apps.values(), key=lambda a: a["name"].lower())
+
+
+# --------------------------------------------------------------------------- #
+# Server and tools
+# --------------------------------------------------------------------------- #
+
+mcp = MCPServer(
+    SERVER_NAME,
+    version=__version__,
+    instructions=(
+        "Control the Linux desktop. Start with list_windows, then get_window_state "
+        "to read a window's elements before acting on them by index. Verify each "
+        "action with a fresh get_window_state or screenshot."
+    ),
+)
+
+
+@mcp.tool()
+def list_apps() -> dict[str, Any]:
+    """List installed desktop applications (from XDG .desktop entries)."""
+    apps = discover_apps()
+    return _audit("list_apps", {}, {"effect": "success", "count": len(apps), "apps": apps})
+
+
+@mcp.tool()
+def list_windows() -> dict[str, Any]:
+    """List open, visible windows with their ids, titles and geometry."""
+    windows = get_driver().list_windows()
+    return _audit(
+        "list_windows",
+        {},
+        {"effect": "success", "count": len(windows), "windows": [w.to_dict() for w in windows]},
+    )
+
+
+@mcp.tool()
+def get_window_state(window_id: int) -> dict[str, Any]:
+    """Get a window's element tree (buttons, fields, menus... via AT-SPI).
+
+    Element indexes from this result are what click, type_text, scroll and
+    screenshot_element take. Call it again after the UI changes.
+    """
+    driver = get_driver()
+    state = _window_state(driver, window_id, acting=False)
+    _remember(state)
+    return _audit(
+        "get_window_state",
+        {"window_id": window_id},
+        {
+            "effect": "success",
             "window_id": state.window_id,
             "pid": state.pid,
-            "screenshot_path": state.screenshot_path,
+            "source": state.source,
+            "sensitive": state.sensitive,
+            "sensitive_reasons": state.sensitive_reasons,
+            "truncated": state.truncated,
             "tree_markdown": state.tree_markdown,
-            "elements": [e.to_dict() for e in state.elements]
-        }
-        
-        session.audit_action("get_window_state", {"window_id": window_id}, {"effect": "success"})
-        return json.dumps(result)
+            "elements": [e.to_dict() for e in state.elements],
+        },
+    )
 
-    @mcp.tool()
-    async def get_app_info(app_id: str = "", window_id: Optional[int] = None) -> str:
-        """Get detailed information about a desktop application."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        result = {
-            "app_id": app_id or "unknown",
-            "name": "Unknown Application",
-            "executable": None,
-            "pid": 0,
-            "version": None,
-            "categories": [],
-            "windows": [],
-            "focused": False
-        }
-        
-        # Try to get info from window if provided
-        if window_id:
-            windows = driver.list_windows()
-            for w in windows:
-                if w.window_id == window_id:
-                    result.update({
-                        "app_id": w.app_id,
-                        "name": w.title,
-                        "pid": w.pid,
-                        "executable": w.app_id,
-                        "windows": [{"window_id": w.window_id, "title": w.title} for w in windows],
-                    })
-                    break
-        
-        session.audit_action("get_app_info", {"app_id": app_id, "window_id": window_id}, {"effect": "success"})
-        return json.dumps(result)
 
-    @mcp.tool()
-    async def click(element: Optional[int] = None,
-                    coordinate: Optional[Dict] = None,
-                    window_id: Optional[int] = None) -> str:
-        """Click on an element or coordinate."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        if element is not None:
-            if window_id is None:
-                windows = driver.list_windows()
-                if windows:
-                    window_id = windows[0].window_id
-                else:
-                    return json.dumps({"effect": "error", "error": "No windows found"})
-            
-            state = driver.get_window_state(window_id)
-            elem = next((e for e in state.elements if e.index == element), None)
-            
-            if elem is None:
-                return json.dumps({"effect": "error", "error": f"Element {element} not found"})
-            
-            success = driver.click(elem)
-        elif coordinate is not None:
-            success = driver.click_coordinate(int(coordinate["x"]), int(coordinate["y"]))
-        else:
-            return json.dumps({"effect": "error", "error": "Must specify element or coordinate"})
-        
-        result = {
+@mcp.tool()
+def get_app_info(window_id: int) -> dict[str, Any]:
+    """Get information about the application that owns a window."""
+    driver = get_driver()
+    window = _find_window(driver, window_id)
+    windows = driver.list_windows()
+    siblings = [
+        {"window_id": w.window_id, "title": w.title}
+        for w in windows
+        if window.pid and w.pid == window.pid
+    ]
+    return _audit(
+        "get_app_info",
+        {"window_id": window_id},
+        {
+            "effect": "success",
+            "app_id": window.app_id,
+            "name": window.app or window.title,
+            "pid": window.pid,
+            "windows": siblings or [{"window_id": window.window_id, "title": window.title}],
+        },
+    )
+
+
+@mcp.tool()
+def click(
+    window_id: int,
+    element: int | None = None,
+    x: int | None = None,
+    y: int | None = None,
+) -> dict[str, Any]:
+    """Click an element by index, or click at absolute screen coordinates x, y.
+
+    Give either `element` or both `x` and `y`.
+    """
+    driver = get_driver()
+    if element is not None:
+        if x is not None or y is not None:
+            raise ToolError("Give either element or x/y, not both.")
+        success = driver.click(_find_element(driver, window_id, element))
+    elif x is not None and y is not None:
+        window = _find_window(driver, window_id)
+        if not (window.x <= x < window.x + window.width and window.y <= y < window.y + window.height):
+            raise ToolError(f"Point ({x}, {y}) is outside window {window_id}.")
+        _window_state(driver, window_id, acting=True)
+        success = driver.click_coordinate(x, y)
+    else:
+        raise ToolError("Give an element index, or both x and y.")
+
+    return _audit(
+        "click",
+        {"window_id": window_id, "element": element, "x": x, "y": y},
+        {"effect": "confirmed" if success else "failed", "window_id": window_id},
+    )
+
+
+@mcp.tool()
+def type_text(text: str, window_id: int, element: int | None = None) -> dict[str, Any]:
+    """Type text into an element, or into the focused part of the window if no element is given."""
+    driver = get_driver()
+    if element is not None:
+        target = _find_element(driver, window_id, element)
+    else:
+        target = _find_element(driver, window_id, 0)
+        if not driver.focus_window(window_id):
+            raise ToolError(f"Could not focus window {window_id}.")
+    success = driver.type_text(text, target)
+    return _audit(
+        "type_text",
+        {"text": text[:100], "window_id": window_id, "element": element},
+        {
             "effect": "confirmed" if success else "failed",
-            "recommendation": "Action completed" if success else "Click failed",
-            "window_id": window_id
-        }
-        
-        session.audit_action("click", {"element": element, "coordinate": coordinate, "window_id": window_id}, result)
-        return json.dumps(result)
+            "characters_typed": len(text) if success else 0,
+            "window_id": window_id,
+        },
+    )
 
-    @mcp.tool()
-    async def type_text(text: str, 
-                        element: Optional[int] = None,
-                        window_id: Optional[int] = None) -> str:
-        """Type text into an element."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        if element is not None:
-            if window_id is None:
-                windows = driver.list_windows()
-                if windows:
-                    window_id = windows[0].window_id
-                else:
-                    return json.dumps({"effect": "error", "error": "No windows found"})
-            
-            state = driver.get_window_state(window_id)
-            elem = next((e for e in state.elements if e.index == element), None)
-            
-            if elem is None:
-                return json.dumps({"effect": "error", "error": f"Element {element} not found"})
-            
-            success = driver.type_text(text, elem)
-        else:
-            return json.dumps({"effect": "error", "error": "Must specify element"})
-        
-        result = {
-            "effect": "confirmed" if success else "failed",
-            "characters_typed": len(text),
-            "window_id": window_id
-        }
-        
-        session.audit_action("type_text", {"text": text[:100], "element": element, "window_id": window_id}, result)
-        return json.dumps(result)
 
-    @mcp.tool()
-    async def press_key(keys: str, 
-                        window_id: Optional[int] = None) -> str:
-        """Press a keyboard key or key combination."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        success = driver.press_key(keys)
-        
-        result = {
-            "effect": "confirmed" if success else "failed",
-            "keys": keys,
-            "window_id": window_id or 1
-        }
-        
-        session.audit_action("press_key", {"keys": keys, "window_id": window_id}, result)
-        return json.dumps(result)
+@mcp.tool()
+def press_key(keys: str, window_id: int | None = None) -> dict[str, Any]:
+    """Press a key or combination in xdotool syntax, e.g. 'Return', 'ctrl+c', 'alt+F4'.
 
-    @mcp.tool()
-    async def scroll(direction: str,
-                     amount: int = 10,
-                     element: Optional[int] = None,
-                     window_id: Optional[int] = None) -> str:
-        """Scroll in an element."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        if element is not None:
-            if window_id is None:
-                windows = driver.list_windows()
-                if windows:
-                    window_id = windows[0].window_id
-                else:
-                    return json.dumps({"effect": "error", "error": "No windows found"})
-            
-            state = driver.get_window_state(window_id)
-            elem = next((e for e in state.elements if e.index == element), None)
-            
-            if elem is None:
-                return json.dumps({"effect": "error", "error": f"Element {element} not found"})
-            
-            success = driver.scroll(direction, amount, elem)
-        else:
-            return json.dumps({"effect": "error", "error": "Must specify element"})
-        
-        result = {
+    If window_id is given, that window is focused first.
+    """
+    driver = get_driver()
+    if window_id is not None:
+        _window_state(driver, window_id, acting=True)
+        if not driver.focus_window(window_id):
+            raise ToolError(f"Could not focus window {window_id}.")
+    else:
+        focused = driver.get_focused_window()
+        if focused is not None:
+            _refuse_if_sensitive(driver.get_window_state(focused))
+    success = driver.press_key(keys)
+    return _audit(
+        "press_key",
+        {"keys": keys, "window_id": window_id},
+        {"effect": "confirmed" if success else "failed", "keys": keys, "window_id": window_id},
+    )
+
+
+@mcp.tool()
+def scroll(
+    direction: Literal["up", "down", "left", "right"],
+    window_id: int,
+    amount: int = 3,
+    element: int = 0,
+) -> dict[str, Any]:
+    """Scroll over an element (default: the whole window) by `amount` wheel steps (1-100)."""
+    if not 1 <= amount <= 100:
+        raise ToolError("amount must be between 1 and 100.")
+    driver = get_driver()
+    success = driver.scroll(direction, amount, _find_element(driver, window_id, element))
+    return _audit(
+        "scroll",
+        {"direction": direction, "amount": amount, "window_id": window_id, "element": element},
+        {
             "effect": "confirmed" if success else "failed",
             "direction": direction,
             "amount": amount,
-            "window_id": window_id or 1
-        }
-        
-        session.audit_action("scroll", {"direction": direction, "amount": amount, "element": element, "window_id": window_id}, result)
-        return json.dumps(result)
-
-    @mcp.tool()
-    async def screenshot_desktop(region: Optional[Dict] = None) -> str:
-        """Take desktop screenshot."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        filepath = driver.screenshot_desktop()
-        
-        result = {
-            "path": filepath,
-            "base64": base64.b64encode(open(filepath, "rb").read()).decode() if filepath else "",
-            "region": region
-        }
-        
-        session.audit_action("screenshot_desktop", {"region": region}, {"effect": "success"})
-        return json.dumps(result)
-
-    @mcp.tool()
-    async def screenshot_window(window_id: int) -> str:
-        """Take window screenshot."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        filepath = driver.screenshot_window(window_id)
-        
-        result = {
-            "path": filepath,
-            "base64": base64.b64encode(open(filepath, "rb").read()).decode() if filepath else "",
-            "window_id": window_id
-        }
-        
-        session.audit_action("screenshot_window", {"window_id": window_id}, {"effect": "success"})
-        return json.dumps(result)
-
-    @mcp.tool()
-    async def screenshot_element(element: int,
-                                  window_id: int) -> str:
-        """Take element screenshot."""
-        session = get_active_session()
-        driver = get_driver()
-        
-        filepath = driver.screenshot_window(window_id)
-        
-        result = {
-            "path": filepath,
-            "base64": base64.b64encode(open(filepath, "rb").read()).decode() if filepath else "",
             "window_id": window_id,
-            "element": element
-        }
-        
-        session.audit_action("screenshot_element", {"element": element, "window_id": window_id}, {"effect": "success"})
-        return json.dumps(result)
+        },
+    )
 
-    async def main():
-        """Main entry point for MCP server."""
-        if not stdio_server:
-            raise RuntimeError("MCP not available. Install with: pip install memorius[mcp]")
-        
-        async with stdio_server() as (read_stream, write_stream):
-            await mcp.run_instance(
-                read_stream,
-                write_stream,
-                InitializeOptions(
-                    server_name="linux-computer-use",
-                    server_version="0.1.0",
-                    capabilities={"tools": {}}
-                )
-            )
 
-else:
-    async def main():
-        """Main entry point when MCP unavailable."""
-        print("MCP not available. Install with: pip install memorius[mcp]")
-    
-    class MCPServer:
-        @classmethod
-        def tool(cls):
-            def decorator(func):
-                return func
-            return decorator
-        
-        @classmethod
-        async def initialize(cls):
-            pass
-        
-        @classmethod
-        async def list_tools(cls):
-            return []
-    
-    mcp = MCPServer()
+def _image_result(tool: str, args: dict[str, Any], path: Path) -> list[Any]:
+    _audit(tool, args, {"effect": "success"})
+    return [Image(path=path), json.dumps({"path": str(path), **args})]
+
+
+@mcp.tool(structured_output=False)
+def screenshot_desktop(
+    x: int | None = None,
+    y: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> list[Any]:
+    """Screenshot the whole desktop, or a region if x, y, width and height are all given."""
+    parts = (x, y, width, height)
+    if any(p is not None for p in parts) and not all(p is not None for p in parts):
+        raise ToolError("For a region, give all of x, y, width and height.")
+    region = (x, y, width, height) if x is not None else None
+    path = _capture(get_driver(), region, "desktop")  # type: ignore[arg-type]
+    return _image_result("screenshot_desktop", {"region": region}, path)
+
+
+@mcp.tool(structured_output=False)
+def screenshot_window(window_id: int) -> list[Any]:
+    """Screenshot a single window."""
+    driver = get_driver()
+    w = _find_window(driver, window_id)
+    path = _capture(driver, (w.x, w.y, w.width, w.height), f"window_{window_id}")
+    return _image_result("screenshot_window", {"window_id": window_id}, path)
+
+
+@mcp.tool(structured_output=False)
+def screenshot_element(window_id: int, element: int) -> list[Any]:
+    """Screenshot a single UI element."""
+    driver = get_driver()
+    e = _find_element(driver, window_id, element, acting=False)
+    path = _capture(driver, (e.x, e.y, e.width, e.height), f"element_{window_id}_{element}")
+    return _image_result("screenshot_element", {"window_id": window_id, "element": element}, path)
+
+
+def main() -> None:
+    """Run the server over stdio."""
+    logging.basicConfig(level=logging.INFO)
+    mcp.run("stdio")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
