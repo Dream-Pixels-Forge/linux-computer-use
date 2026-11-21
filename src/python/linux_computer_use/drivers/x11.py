@@ -24,6 +24,10 @@ class X11Driver(Driver):
         self._accessibles: dict[tuple[int, int], Any] = {}
         self._parents: dict[tuple[int, int], int] = {}
         self._roots: dict[int, Any] = {}
+        # Windows whose toolkit screen coordinates are wrong (e.g. GTK 4):
+        # window_id -> the root's window-relative origin, so screen positions
+        # can be rebuilt from the window's current X11 position.
+        self._relative_roots: dict[int, tuple[int, int]] = {}
         self._screen: tuple[int, int, int, int] | None = None
 
     def connect(self) -> bool:
@@ -195,12 +199,16 @@ class X11Driver(Driver):
             del self._accessibles[key]
             self._parents.pop(key, None)
         self._roots.pop(window_id, None)
+        self._relative_roots.pop(window_id, None)
 
         root = self.atspi.find_window(pid, title, rect)
         if root is not None:
-            tree = self.atspi.read_tree(root, window_id, self._screen_rect())
+            offset = self.atspi.window_offset(root, rect)
+            tree = self.atspi.read_tree(root, window_id, self._screen_rect(), offset)
             if tree.elements:
                 self._roots[window_id] = root
+                if offset is not None and rect is not None:
+                    self._relative_roots[window_id] = (rect[0] - offset[0], rect[1] - offset[1])
                 for element, accessible in zip(tree.elements, tree.accessibles, strict=True):
                     self._accessibles[(window_id, element.index)] = accessible
                     self._parents[(window_id, element.index)] = element.parent_index
@@ -266,7 +274,7 @@ class X11Driver(Driver):
         accessible = self._accessibles.get((window_id, index))
         if accessible is not None:
             parent = self._parents.get((window_id, index), -1)
-            return self.atspi.refresh(accessible, window_id, index, parent)
+            return self.atspi.refresh(accessible, window_id, index, parent, self._offset(window_id))
         if index != 0 or window_id in self._roots:
             return None
         window = self.get_window(window_id)
@@ -277,6 +285,17 @@ class X11Driver(Driver):
             x=window.x, y=window.y, width=window.width, height=window.height,
             window_id=window_id,
         )
+
+    def _offset(self, window_id: int) -> tuple[int, int] | None:
+        """Current window-relative-to-screen offset, re-read from X11 so a
+        window moved since get_window_state still gets correct positions."""
+        relative_root = self._relative_roots.get(window_id)
+        if relative_root is None:
+            return None
+        window = self.get_window(window_id)
+        if window is None:
+            return None
+        return (window.x - relative_root[0], window.y - relative_root[1])
 
     def check_sensitive(self, window_id: int) -> list[str]:
         """Reasons the window is sensitive (e.g. a password field), or [].

@@ -30,3 +30,24 @@ def test_multiline_title():
 
 def test_missing_window():
     assert parse_window_query("", 1) is None
+
+
+def test_offset_follows_window_moves(monkeypatch):
+    """Positions of GTK 4 windows are rebuilt from the window's current X11 origin."""
+    from linux_computer_use.drivers.base import Window
+    from linux_computer_use.drivers.x11 import X11Driver
+
+    driver = X11Driver()
+    driver._relative_roots[7] = (0, 0)
+    position = {"x": 300, "y": 200}
+    monkeypatch.setattr(
+        driver, "get_window",
+        lambda wid: Window(
+            window_id=wid, pid=1, app_id="", title="t", x=position["x"], y=position["y"],
+            width=360, height=220, workspace=0, visible=True,
+        ),
+    )
+    assert driver._offset(7) == (300, 200)
+    position.update(x=600, y=350)
+    assert driver._offset(7) == (600, 350)
+    assert driver._offset(8) is None  # trusted toolkit: no offset

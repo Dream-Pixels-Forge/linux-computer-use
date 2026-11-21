@@ -49,6 +49,10 @@ REPORTED_STATES = (
 #: in one Collection query instead of one call per child (big lists, grids).
 BULK_CHILDREN = 32
 
+#: Pixels by which an accessible window's position may differ from X11's and
+#: still count as the same place (window decorations, CSD shadows).
+MATCH_TOLERANCE = 64
+
 #: Coordinates at or below this mean "no position" (toolkits report INT_MIN).
 _NO_POSITION = -(1 << 30)
 
@@ -155,23 +159,64 @@ class ATSPIDriver:
     # Reading the tree
     # ------------------------------------------------------------------ #
 
-    def extents(self, accessible: Any) -> tuple[int, int, int, int] | None:
+    def extents(
+        self, accessible: Any, offset: tuple[int, int] | None = None
+    ) -> tuple[int, int, int, int] | None:
+        """Screen rectangle of an accessible.
+
+        With ``offset`` None, trusts the toolkit's screen coordinates. Otherwise
+        reads window-relative coordinates and adds ``offset`` (see
+        ``window_offset``), for toolkits whose screen coordinates are wrong.
+        """
+        rect = self._raw_extents(accessible, window=offset is not None)
+        if rect is None or offset is None:
+            return rect
+        x, y, w, h = rect
+        return (x + offset[0], y + offset[1], w, h)
+
+    def _raw_extents(self, accessible: Any, *, window: bool) -> tuple[int, int, int, int] | None:
         try:
             component = accessible.get_component_iface()
             if component is None:
                 return None
-            rect = component.get_extents(self._atspi.CoordType.SCREEN)  # type: ignore[union-attr]
+            coord = self._atspi.CoordType  # type: ignore[union-attr]
+            rect = component.get_extents(coord.WINDOW if window else coord.SCREEN)
         except Exception:
             return None
         if rect.x <= _NO_POSITION or rect.y <= _NO_POSITION:
             return None  # toolkit has no position for it (e.g. a scrolled GTK viewport)
         return (rect.x, rect.y, rect.width, rect.height)
 
+    def window_offset(
+        self, root: Any, window_rect: tuple[int, int, int, int] | None
+    ) -> tuple[int, int] | None:
+        """How to turn this window's element positions into screen positions.
+
+        Returns None when the toolkit's screen coordinates can be trusted, or an
+        (x, y) offset to add to window-relative coordinates when they can't.
+        GTK 4 reports every element at screen position 0,0 (on X11 as well as
+        Wayland) while its window-relative positions are right; other toolkits
+        are caught by their window's screen position disagreeing with X11's.
+        """
+        if window_rect is None:
+            return None
+        screen = self._raw_extents(root, window=False)
+        trusted = not _is_gtk4_or_later(root) and screen is not None and all(
+            abs(a - b) <= MATCH_TOLERANCE for a, b in zip(screen[:2], window_rect[:2], strict=True)
+        )
+        if trusted:
+            return None
+        relative = self._raw_extents(root, window=True)
+        if relative is None:
+            return None
+        return (window_rect[0] - relative[0], window_rect[1] - relative[1])
+
     def read_tree(
         self,
         root: Any,
         window_id: int,
         screen: tuple[int, int, int, int] | None = None,
+        offset: tuple[int, int] | None = None,
     ) -> AccessibleTree:
         """Flatten the visible part of an accessible tree, depth first.
 
@@ -180,13 +225,13 @@ class ATSPIDriver:
         and which dominate the cost of reading large windows.
         """
         tree = AccessibleTree(elements=[], accessibles=[], depths=[])
-        clip = self.extents(root)
+        clip = self.extents(root, offset)
         if clip is not None and (clip[2] <= 0 or clip[3] <= 0):
             clip = None
         if screen is not None:
             # A window taller than the screen (no scroller) is only visible on screen.
             clip = _intersect(clip, screen) if clip is not None else screen
-        self._walk(root, window_id, -1, 0, tree, clip)
+        self._walk(root, window_id, -1, 0, tree, clip, offset)
         return tree
 
     def _walk(
@@ -197,6 +242,7 @@ class ATSPIDriver:
         depth: int,
         tree: AccessibleTree,
         clip: tuple[int, int, int, int] | None,
+        offset: tuple[int, int] | None = None,
     ) -> None:
         if len(tree.elements) >= MAX_ELEMENTS:
             tree.truncated = True
@@ -204,7 +250,7 @@ class ATSPIDriver:
         states = _state_nicks(node)
         if parent >= 0 and "showing" not in states and not self._has_showing_descendant(node):
             return  # hidden subtree (collapsed menu, inactive tab, ...)
-        rect = self.extents(node) or (0, 0, 0, 0)
+        rect = self.extents(node, offset) or (0, 0, 0, 0)
         if parent >= 0 and clip is not None and not _overlaps(rect, clip):
             tree.offscreen += 1
             return
@@ -224,7 +270,7 @@ class ATSPIDriver:
         if depth >= MAX_DEPTH:
             return
         for child in self._showing_children(node):
-            self._walk(child, window_id, index, depth + 1, tree, clip)
+            self._walk(child, window_id, index, depth + 1, tree, clip, offset)
 
     def _showing_rule(self) -> Any:
         atspi = self._atspi
@@ -303,7 +349,14 @@ class ATSPIDriver:
             ),
         )
 
-    def refresh(self, node: Any, window_id: int, index: int, parent: int) -> Element | None:
+    def refresh(
+        self,
+        node: Any,
+        window_id: int,
+        index: int,
+        parent: int,
+        offset: tuple[int, int] | None = None,
+    ) -> Element | None:
         """Re-read one element from its live accessible, without walking the tree.
 
         Returns None if the widget is gone or no longer showing, so callers
@@ -315,7 +368,7 @@ class ATSPIDriver:
         if index != 0 and "showing" not in states:
             return None
         return self._element(
-            node, window_id, index, parent, states, self.extents(node) or (0, 0, 0, 0)
+            node, window_id, index, parent, states, self.extents(node, offset) or (0, 0, 0, 0)
         )
 
     def find_sensitive(self, root: Any) -> list[str] | None:
@@ -398,13 +451,15 @@ def match_window(
     title: str,
     geometry: tuple[int, int, int, int] | None,
     extents: Any,
-    tolerance: int = 64,
+    tolerance: int | None = None,
 ) -> Any | None:
     """Pick the accessible window that best matches an X11 window.
 
     Prefers the same title and position, then the same title, then the same
     position, then the only window the app has.
     """
+    tolerance = MATCH_TOLERANCE if tolerance is None else tolerance
+
     def near(acc: Any) -> bool:
         if geometry is None:
             return False
@@ -436,6 +491,17 @@ def _intersect(
     x1, y1 = max(a[0], b[0]), max(a[1], b[1])
     x2, y2 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
     return (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
+
+
+def _is_gtk4_or_later(node: Any) -> bool:
+    """GTK 4+ reports every element at screen 0,0 over AT-SPI."""
+    try:
+        app = node.get_application()
+        if str(app.get_toolkit_name()).lower() != "gtk":
+            return False
+        return int(str(app.get_toolkit_version()).split(".")[0]) >= 4
+    except Exception:
+        return False
 
 
 def _children(node: Any) -> list[Any]:

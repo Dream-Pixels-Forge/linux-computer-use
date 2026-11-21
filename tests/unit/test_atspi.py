@@ -26,13 +26,19 @@ class FakeAction:
         return True
 
 
+SCREEN, WINDOW = 0, 1
+
+
 class FakeComponent:
-    def __init__(self, rect: tuple[int, int, int, int]) -> None:
+    def __init__(
+        self, rect: tuple[int, int, int, int], window_rect: tuple[int, int, int, int] | None = None
+    ) -> None:
         self.rect = rect
+        self.window_rect = window_rect if window_rect is not None else rect
         self.focused = False
 
-    def get_extents(self, _coord: Any) -> SimpleNamespace:
-        x, y, w, h = self.rect
+    def get_extents(self, coord: Any) -> SimpleNamespace:
+        x, y, w, h = self.window_rect if coord == WINDOW else self.rect
         return SimpleNamespace(x=x, y=y, width=w, height=h)
 
     def grab_focus(self) -> bool:
@@ -112,7 +118,7 @@ def driver() -> ATSPIDriver:
     d = ATSPIDriver()
     d._tried = True
     d._atspi = SimpleNamespace(
-        CoordType=SimpleNamespace(SCREEN=0),
+        CoordType=SimpleNamespace(SCREEN=SCREEN, WINDOW=WINDOW),
         Text=SimpleNamespace(
             get_character_count=lambda n: n.get_text_iface().get_character_count(),
             get_text=lambda n, start, end: n.get_text_iface().get_text(start, end),
@@ -388,3 +394,59 @@ def test_unavailable_without_pygobject(monkeypatch: pytest.MonkeyPatch) -> None:
     d = ATSPIDriver()
     assert not d.available
     assert d.find_window(123, "x", None) is None
+
+
+class App:
+    def __init__(self, name: str, version: str) -> None:
+        self.name, self.version = name, version
+
+    def get_toolkit_name(self) -> str:
+        return self.name
+
+    def get_toolkit_version(self) -> str:
+        return self.version
+
+
+def gtk4_window() -> Node:
+    """Like GTK 4 on X11 at 300,200: screen extents all 0,0, window-relative ones right."""
+    button = Node("push button", "Count", actions=["click"])
+    button.component = FakeComponent((0, 0, 360, 34), window_rect=(17, 68, 360, 34))
+    frame = Node("frame", "X4", children=[button])
+    frame.component = FakeComponent((0, 0, 360, 220), window_rect=(0, 0, 360, 220))
+    frame.get_application = lambda: App("GTK", "4.14.5")  # type: ignore[attr-defined]
+    return frame
+
+
+def test_gtk4_uses_window_relative_positions(driver: ATSPIDriver) -> None:
+    frame = gtk4_window()
+    offset = driver.window_offset(frame, (300, 200, 360, 220))
+    assert offset == (300, 200)
+    tree = driver.read_tree(frame, window_id=1, screen=(0, 0, 1280, 800), offset=offset)
+    button = tree.elements[1]
+    assert (button.x, button.y, button.width) == (317, 268, 360)
+    assert (tree.elements[0].x, tree.elements[0].y) == (300, 200)
+
+
+def test_refresh_applies_the_offset(driver: ATSPIDriver) -> None:
+    button = gtk4_window().kids[0]
+    fresh = driver.refresh(button, window_id=1, index=1, parent=0, offset=(600, 350))
+    assert fresh is not None and (fresh.x, fresh.y) == (617, 418)
+
+
+def test_trusted_screen_coordinates_are_kept(driver: ATSPIDriver) -> None:
+    frame = Node("frame", "X3", rect=(60, 60, 360, 260))
+    frame.component = FakeComponent((60, 60, 360, 260), window_rect=(0, 0, 360, 260))
+    frame.get_application = lambda: App("gtk", "3.24.41")  # type: ignore[attr-defined]
+    assert driver.window_offset(frame, (60, 60, 360, 260)) is None
+    assert driver.window_offset(frame, (90, 90, 360, 260)) is None  # decorations: within tolerance
+
+
+def test_other_toolkits_with_wrong_screen_positions_get_an_offset(driver: ATSPIDriver) -> None:
+    frame = Node("frame", "Q")
+    frame.component = FakeComponent((0, 0, 400, 300), window_rect=(0, 0, 400, 300))
+    frame.get_application = lambda: App("Qt", "6.7")  # type: ignore[attr-defined]
+    assert driver.window_offset(frame, (500, 400, 400, 300)) == (500, 400)
+
+
+def test_no_offset_without_window_geometry(driver: ATSPIDriver) -> None:
+    assert driver.window_offset(gtk4_window(), None) is None
