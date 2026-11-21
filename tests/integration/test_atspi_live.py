@@ -25,12 +25,13 @@ from mcp.client.stdio import StdioServerParameters
 
 GTK_PYTHON = os.environ.get("LCU_GTK_PYTHON", "/usr/bin/python3")
 DEMO_APP = Path(__file__).parent / "apps" / "gtk_demo.py"
+GTK4_APP = Path(__file__).parent / "apps" / "gtk4_demo.py"
 
 
-def _gtk_available() -> bool:
+def _gtk_available(version: str = "3.0") -> bool:
     if not Path(GTK_PYTHON).exists():
         return False
-    check = "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk"
+    check = f"import gi; gi.require_version('Gtk', '{version}'); from gi.repository import Gtk"
     return subprocess.run([GTK_PYTHON, "-c", check], capture_output=True, check=False).returncode == 0
 
 
@@ -44,9 +45,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _start_app(title: str, *extra: str) -> tuple[subprocess.Popen[bytes], int]:
+def _start_app(
+    title: str, *extra: str, app: Path = DEMO_APP
+) -> tuple[subprocess.Popen[bytes], int]:
     proc = subprocess.Popen(
-        [GTK_PYTHON, str(DEMO_APP), title, *extra],
+        [GTK_PYTHON, str(app), title, *extra],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(100):
@@ -72,6 +75,19 @@ def demo() -> Iterator[int]:
 @pytest.fixture
 def long_list() -> Iterator[int]:
     proc, window_id = _start_app("LCU List", "--rows", "500")
+    yield window_id
+    proc.kill()
+    proc.wait()
+
+
+@pytest.fixture
+def gtk4_moved() -> Iterator[int]:
+    if not _gtk_available("4.0"):
+        pytest.skip("needs GTK 4 (gir1.2-gtk-4.0)")
+    proc, window_id = _start_app("LCU GTK4", app=GTK4_APP)
+    # GTK 4 can't place its own window; move it away from 0,0 so wrong
+    # (screen 0,0) positions can't pass by accident.
+    subprocess.run(["xdotool", "windowmove", "--sync", str(window_id), "300", "200"], check=True)
     yield window_id
     proc.kill()
     proc.wait()
@@ -204,3 +220,25 @@ async def _check_long_list(client: Client, window_id: int) -> None:
     time.sleep(0.2)
     picked = await _state(client, window_id)
     assert _find(picked, "label", f"Picked {target['name'].split()[1]}")
+
+
+async def test_gtk4_positions_are_on_screen_and_clickable(gtk4_moved: int) -> None:
+    async with _server() as client:
+        await _check_gtk4_positions(client, gtk4_moved)
+
+
+async def _check_gtk4_positions(client: Client, window_id: int) -> None:
+    state = await _state(client, window_id)
+    window = state["elements"][0]["geometry"]
+    assert (window["x"], window["y"]) == (300, 200)
+    button = _find(state, "push button", "Count")["geometry"]
+    # Inside the window, not at screen 0,0 as GTK 4 reports it.
+    assert window["x"] <= button["x"] < window["x"] + window["width"]
+    assert window["y"] <= button["y"] < window["y"] + window["height"]
+
+    # A click at the reported position must hit the button.
+    x, y = button["x"] + button["width"] // 2, button["y"] + button["height"] // 2
+    await _act(client, "click", {"window_id": window_id, "x": x, "y": y})
+    time.sleep(0.3)
+    after = await _state(client, window_id)
+    assert _find(after, "label", "Clicks: 1")
