@@ -227,7 +227,7 @@ screenshot = await proxy.screenshot_window(windows[0].window_id)
 | Platform | Read | Write | Notes |
 |----------|------|-------|-------|
 | X11 (most Linux) | ✅ | ✅ | Full support |
-| Wayland (GNOME/KDE) | ⚠️ | ⚠️ | Read-only (compositor restrictions) |
+| Wayland (GNOME/KDE) | ⚠️ | ⚠️ | Not yet supported; see [docs/design/wayland.md](docs/design/wayland.md) |
 | Xvfb (Virtual) | ✅ | ✅ | Testing environments |
 | AT-SPI (Accessibility) | ✅ | ✅ | Integrated with X11/Wayland |
 
