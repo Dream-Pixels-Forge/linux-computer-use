@@ -31,8 +31,8 @@ pip install -e .
 # Via Python
 python -m linux_computer_use.mcp
 
-# Or with npx
-npx linux-computer-use
+# Or via the CLI entry point
+linux-computer-use start
 ```
 
 ### Using with an AI Agent
@@ -237,7 +237,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 
-# Node.js setup
+# TypeScript types (optional)
 pnpm install
 
 # Install test apps (Ubuntu/Debian)
@@ -250,26 +250,21 @@ sudo apt-get install -y gnome-calculator firefox gedit libreoffice
 # Unit tests
 pytest tests/unit/ -v
 
-# Integration tests (requires DISPLAY)
-export DISPLAY=:99
-Xvfb :99 -screen 0 1920x1080x24 &
-pytest tests/integration/ -v
-
-# All tests
-pnpm test
+# Integration tests: drive a real X display (needs xdotool, scrot, xterm)
+sudo apt-get install -y xvfb xdotool scrot xterm
+xvfb-run -a pytest tests/integration/ -v
 ```
 
 ### Code Quality
 
 ```bash
-# Python
-mypy src/python/
-ruff check src/python/
-pytest tests/
+# Python (same checks as CI)
+ruff check src/python tests
+mypy src/python
+pytest tests/unit
 
-# TypeScript
-pnpm tsc --noEmit
-pnpm lint
+# TypeScript types
+pnpm typecheck
 pnpm build
 ```
 

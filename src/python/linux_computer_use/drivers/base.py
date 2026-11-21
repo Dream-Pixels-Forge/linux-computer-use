@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Any
 
 
 @dataclass
@@ -12,18 +12,18 @@ class Element:
     role: str
     name: str
     description: str = ""
-    state: List[str] = field(default_factory=list)
+    state: list[str] = field(default_factory=list)
     x: int = 0
     y: int = 0
     width: int = 0
     height: int = 0
     parent_index: int = -1
-    children: List[int] = field(default_factory=list)
+    children: list[int] = field(default_factory=list)
     automation_id: str = ""
     class_name: str = ""
     window_id: int = 0
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "index": self.index,
@@ -59,8 +59,8 @@ class Window:
     workspace: int
     visible: bool
     app: str = ""
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "window_id": self.window_id,
@@ -86,52 +86,44 @@ class WindowState:
     pid: int
     screenshot_path: str
     tree_markdown: str
-    elements: List[Element]
-    raw_tree: Optional[Dict] = None
+    elements: list[Element]
+    raw_tree: dict[str, Any] | None = None
 
 
 class Driver(ABC):
     """Abstract base class for desktop drivers."""
-    
+
     @abstractmethod
     def connect(self) -> bool:
         """Connect to the display server."""
-        pass
-    
+
     @abstractmethod
-    def list_windows(self) -> List[Window]:
+    def list_windows(self) -> list[Window]:
         """List all open windows."""
-        pass
-    
+
     @abstractmethod
     def get_window_state(self, window_id: int) -> WindowState:
         """Get detailed state of a window."""
-        pass
-    
+
     @abstractmethod
     def click(self, element: Element) -> bool:
         """Click on an element."""
-        pass
-    
+
     @abstractmethod
     def type_text(self, text: str, element: Element) -> bool:
         """Type text into an element."""
-        pass
-    
+
     @abstractmethod
     def scroll(self, direction: str, amount: int, element: Element) -> bool:
         """Scroll in an element."""
-        pass
-    
+
     @abstractmethod
     def screenshot_window(self, window_id: int) -> str:
         """Take screenshot of window."""
-        pass
-    
+
     @abstractmethod
-    def screenshot_desktop(self, region: Optional[tuple] = None) -> str:
+    def screenshot_desktop(self, region: tuple[int, int, int, int] | None = None) -> str:
         """Take screenshot of desktop."""
-        pass
 
 
 class Result:
@@ -140,8 +132,8 @@ class Result:
         self.success = success
         self.effect = effect
         self.recommendation = recommendation
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "success": self.success,
             "effect": self.effect,

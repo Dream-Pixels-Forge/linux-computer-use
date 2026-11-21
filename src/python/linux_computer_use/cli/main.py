@@ -2,7 +2,6 @@
 """CLI interface for linux_computer_use."""
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -21,12 +20,12 @@ def create_parser() -> argparse.ArgumentParser:
         prog="linux-computer-use",
         description="Unified Linux desktop control layer for AI agents"
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-    
+
     # Start MCP server
     start_parser = subparsers.add_parser(
-        "start", 
+        "start",
         help="Start MCP server"
     )
     start_parser.add_argument(
@@ -35,13 +34,13 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Port for WebSocket server (optional)"
     )
-    
+
     # List windows
-    list_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "list-windows",
         help="List open windows"
     )
-    
+
     # Screenshot
     shot_parser = subparsers.add_parser(
         "screenshot",
@@ -58,13 +57,13 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output file path"
     )
-    
+
     # Status
-    status_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "status",
         help="Show server status"
     )
-    
+
     return parser
 
 
@@ -78,25 +77,25 @@ def start_mcp_server(port: int | None = None) -> None:
     run_mcp_server()
 
 
-def main():
+def main() -> int:
     """Main entry point."""
     parser = create_parser()
     args = parser.parse_args()
-    
+
     if args.command is None:
         parser.print_help()
         return 0
-    
+
     if args.command == "start":
         start_mcp_server(args.port)
         return 0
-    
+
     if args.command == "status":
         print("linux_computer_use server status:")
         print("  MCP: available" if MCP_AVAILABLE else "  MCP: not available")
         print(f"  Version: {__version__}")
         return 0
-    
+
     if args.command == "list-windows":
         from linux_computer_use.drivers.x11 import X11Driver
         driver = X11Driver()
@@ -105,7 +104,7 @@ def main():
         for w in windows:
             print(f"{w.window_id}\t{w.title}")
         return 0
-    
+
     print(f"Command '{args.command}' not yet implemented", file=sys.stderr)
     return 1
 

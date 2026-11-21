@@ -1,25 +1,22 @@
 """X11 driver for desktop interaction."""
 
-from linux_computer_use.drivers.base import Driver, Window, Element, WindowState, Result
-from typing import Optional, List, Tuple
 import subprocess
 import tempfile
-import os
-import time
-import json
 from pathlib import Path
+
+from linux_computer_use.drivers.base import Driver, Element, Window, WindowState
 
 
 class X11Driver(Driver):
     """Driver for X11 display server using xdotool and scrot."""
-    
-    def __init__(self, display: Optional[str] = None):
+
+    def __init__(self, display: str | None = None):
         """Initialize X11 driver."""
         self.display = display or ":0"
         self._connected = False
-        self._shot_dir: Optional[Path] = None
+        self._shot_dir: Path | None = None
         self._shot_count = 0
-    
+
     def connect(self) -> bool:
         """Connect to X11 server."""
         try:
@@ -35,14 +32,14 @@ class X11Driver(Driver):
         except (subprocess.TimeoutExpired, FileNotFoundError):
             self._connected = False
             return False
-    
-    def list_windows(self) -> List[Window]:
+
+    def list_windows(self) -> list[Window]:
         """List all open windows on X11."""
         if not self._connected:
             self.connect()
-        
+
         windows = []
-        
+
         try:
             # Get window IDs
             result = subprocess.run(
@@ -51,21 +48,20 @@ class X11Driver(Driver):
                 text=True,
                 timeout=10
             )
-            
+
             if result.returncode != 0:
                 return []
-            
-            window_ids = [w for w in result.stdout.strip().split("\n") if w.isdigit()]
-            
+
+            window_ids = [int(w) for w in result.stdout.split() if w.isdigit()]
+
             for win_id in window_ids:
-                win_id = int(win_id)
-                
+
                 # Get window geometry
                 geom = self._get_window_geometry(win_id)
-                
+
                 # Get window name
                 name = self._get_window_name(win_id)
-                
+
                 windows.append(Window(
                     window_id=win_id,
                     pid=geom.get("pid", 0) if geom else 0,
@@ -79,13 +75,13 @@ class X11Driver(Driver):
                     visible=True,
                     app=""
                 ))
-                
+
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
-        
+
         return windows
-    
-    def _get_window_geometry(self, window_id: int) -> Optional[dict]:
+
+    def _get_window_geometry(self, window_id: int) -> dict[str, int] | None:
         """Get window geometry using xdotool."""
         try:
             result = subprocess.run(
@@ -94,10 +90,10 @@ class X11Driver(Driver):
                 text=True,
                 timeout=5
             )
-            
+
             if result.returncode != 0:
                 return None
-            
+
             fields = dict(
                 line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
             )
@@ -108,10 +104,10 @@ class X11Driver(Driver):
                 geom["pid"] = pid
 
             return geom if geom else None
-            
+
         except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
             return None
-    
+
     def _get_window_pid(self, window_id: int) -> int:
         """Get the PID that owns a window (0 if unknown)."""
         try:
@@ -126,7 +122,7 @@ class X11Driver(Driver):
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return 0
 
-    def _get_window_name(self, window_id: int) -> Optional[str]:
+    def _get_window_name(self, window_id: int) -> str | None:
         """Get window name."""
         try:
             result = subprocess.run(
@@ -135,29 +131,29 @@ class X11Driver(Driver):
                 text=True,
                 timeout=5
             )
-            
+
             if result.returncode == 0:
                 return result.stdout.strip() or None
             return None
-            
+
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return None
-    
+
     def get_window_state(self, window_id: int) -> WindowState:
         """Get detailed state of a window."""
         if not self._connected:
             self.connect()
-        
+
         # Get geometry
         geom = self._get_window_geometry(window_id)
-        
+
         # Get screenshot path
         screenshot_path = self.screenshot_window(window_id)
-        
+
         # Build element tree (simplified for X11)
         elements = self._build_element_tree(window_id)
         tree_markdown = self._build_tree_markdown(elements)
-        
+
         return WindowState(
             window_id=window_id,
             pid=geom.get("pid", 0) if geom else 0,
@@ -165,15 +161,15 @@ class X11Driver(Driver):
             tree_markdown=tree_markdown,
             elements=elements
         )
-    
-    def _build_element_tree(self, window_id: int) -> List[Element]:
+
+    def _build_element_tree(self, window_id: int) -> list[Element]:
         """Build element tree from window."""
         elements = []
-        
+
         # For X11, we create a simplified tree
         # In production, this would integrate with AT-SPI
         geom = self._get_window_geometry(window_id)
-        
+
         if geom:
             # Root window element
             elements.append(Element(
@@ -186,28 +182,28 @@ class X11Driver(Driver):
                 height=geom.get("height", 0),
                 window_id=window_id
             ))
-        
+
         return elements
-    
-    def _build_tree_markdown(self, elements: List[Element]) -> str:
+
+    def _build_tree_markdown(self, elements: list[Element]) -> str:
         """Build markdown representation of element tree."""
         if not elements:
             return "No elements found"
-        
+
         lines = ["# Element Tree", ""]
         for elem in elements:
             indent = "\t" * (len(elem.children) if elem.parent_index >= 0 else 0)
             lines.append(f"{indent}- [{elem.role}] {elem.name}")
             if elem.state:
                 lines.append(f"{indent}  States: {', '.join(elem.state)}")
-        
+
         return "\n".join(lines)
-    
+
     def click(self, element: Element) -> bool:
         """Click on an element by coordinates."""
         try:
             subprocess.run(
-                ["xdotool", "mousemove", 
+                ["xdotool", "mousemove",
                  str(element.x + element.width // 2),
                  str(element.y + element.height // 2),
                  "click", "1"],
@@ -217,7 +213,7 @@ class X11Driver(Driver):
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
+
     def click_coordinate(self, x: int, y: int) -> bool:
         """Click at specific coordinates."""
         try:
@@ -229,7 +225,7 @@ class X11Driver(Driver):
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
+
     def type_text(self, text: str, element: Element) -> bool:
         """Type text into an element."""
         try:
@@ -241,7 +237,7 @@ class X11Driver(Driver):
                 capture_output=True,
                 timeout=5
             )
-            
+
             # Type the text
             subprocess.run(
                 ["xdotool", "type", "--delay", "0", text],
@@ -251,8 +247,8 @@ class X11Driver(Driver):
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
-    def press_key(self, keys: str, element: Optional[Element] = None) -> bool:
+
+    def press_key(self, keys: str, element: Element | None = None) -> bool:
         """Press a keyboard key or key combination."""
         try:
             subprocess.run(
@@ -263,7 +259,7 @@ class X11Driver(Driver):
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
+
     def scroll(self, direction: str, amount: int, element: Element) -> bool:
         """Scroll over an element with mouse-wheel clicks (X11 buttons 4-7)."""
         button = {"up": "4", "down": "5", "left": "6", "right": "7"}.get(direction)
@@ -281,7 +277,7 @@ class X11Driver(Driver):
             return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
-    
+
     def _scrot(self, name: str) -> str:
         """Capture the screen with scrot into a fresh file in a private temp dir.
 
@@ -306,11 +302,11 @@ class X11Driver(Driver):
         """Take screenshot of the screen (callers crop to the window geometry)."""
         return self._scrot(f"window_{window_id}")
 
-    def screenshot_desktop(self, region: Optional[Tuple[int, int, int, int]] = None) -> str:
+    def screenshot_desktop(self, region: tuple[int, int, int, int] | None = None) -> str:
         """Take screenshot of desktop."""
         return self._scrot("desktop")
 
-    def get_focused_window(self) -> Optional[int]:
+    def get_focused_window(self) -> int | None:
         """Get the currently focused window."""
         try:
             result = subprocess.run(
@@ -319,14 +315,14 @@ class X11Driver(Driver):
                 text=True,
                 timeout=5
             )
-            
+
             if result.returncode == 0 and result.stdout.strip().isdigit():
                 return int(result.stdout.strip())
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
-        
+
         return None
-    
+
     def focus_window(self, window_id: int) -> bool:
         """Focus a window.
 
