@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: false  # Will use poetry
+      
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "PATH=$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: poetry install --with dev
+      
+      - name: Run Python type check
+        run: poetry run mypy src/python/
+      
+      - name: Run Python lint
+        run: poetry run ruff check src/python/
+      
+      - name: Run Python tests
+        run: poetry run pytest tests/unit/ -v
+
+  node-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      
+      - name: Install pnpm
+        run: npm i -g pnpm@11.5.1
+      
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      
+      - name: Run TypeScript type check
+        run: pnpm tsc --noEmit
+      
+      - name: Run Node.js lint
+        run: pnpm lint
+
+  build:
+    needs: [quality, node-quality]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "PATH=$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Build Python package
+        run: poetry build
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      
+      - name: Install pnpm
+        run: npm i -g pnpm@11.5.1
+      
+      - name: Build Node.js package
+        run: pnpm build
