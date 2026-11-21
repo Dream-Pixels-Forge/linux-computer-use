@@ -30,6 +30,7 @@ class FakeDriver:
         self.elements = [Element(**vars(e)) for e in ELEMENTS]
         self.sensitive = False
         self.focused: int | None = 42
+        self.tree_reads = 0
 
     def connect(self) -> bool:
         return True
@@ -37,7 +38,17 @@ class FakeDriver:
     def list_windows(self) -> list[Window]:
         return [WINDOW]
 
+    def get_window(self, window_id: int) -> Window | None:
+        return WINDOW if window_id == WINDOW.window_id else None
+
+    def resolve_element(self, window_id: int, index: int) -> Element | None:
+        return next((e for e in self.elements if e.index == index), None)
+
+    def check_sensitive(self, window_id: int) -> list[str]:
+        return ["password field"] if self.sensitive else []
+
     def get_window_state(self, window_id: int) -> WindowState:
+        self.tree_reads += 1
         return WindowState(
             window_id, 1000, "", "- [0] window Notes", list(self.elements), source="atspi",
             sensitive=self.sensitive,
@@ -198,6 +209,29 @@ async def test_get_window_state_reports_source_and_sensitivity(driver):
     data = await read()
     assert data["source"] == "atspi"
     assert data["sensitive"] is False
+    assert data["offscreen"] == 0
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("click", {"window_id": 42, "element": 1}),
+        ("click", {"window_id": 42, "x": 105, "y": 56}),
+        ("type_text", {"text": "hi", "window_id": 42, "element": 1}),
+        ("type_text", {"text": "hi", "window_id": 42}),
+        ("press_key", {"keys": "Return", "window_id": 42}),
+        ("press_key", {"keys": "Return"}),
+        ("scroll", {"direction": "down", "window_id": 42}),
+        ("screenshot_element", {"window_id": 42, "element": 1}),
+    ],
+)
+async def test_actions_after_a_read_do_not_reread_the_tree(driver, tool, args):
+    """Large windows take ~0.6 s per 1000 elements to read; actions must not pay that."""
+    await read()
+    assert driver.tree_reads == 1
+    result = await call(tool, args)
+    assert not result.is_error, result.content
+    assert driver.tree_reads == 1
 
 
 @pytest.mark.parametrize(

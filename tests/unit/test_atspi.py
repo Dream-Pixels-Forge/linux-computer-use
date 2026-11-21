@@ -122,7 +122,7 @@ def driver() -> ATSPIDriver:
 
 
 def demo_window() -> Node:
-    return Node("frame", "Demo", rect=(60, 60, 360, 260), children=[
+    return Node("frame", "Demo", rect=(0, 0, 360, 260), children=[
         Node("filler", children=[
             Node("label", "Clicks: 0"),
             Node("text", states=("showing", "editable", "focusable", "enabled"), actions=["activate"]),
@@ -143,7 +143,7 @@ def test_read_tree_flattens_visible_nodes(driver: ATSPIDriver) -> None:
     ]
     assert tree.elements[1].children == [2, 3, 4]
     assert tree.elements[0].window_id == 7
-    assert (tree.elements[0].x, tree.elements[0].width) == (60, 360)
+    assert (tree.elements[0].x, tree.elements[0].width) == (0, 360)
     assert not tree.sensitive and not tree.truncated
 
 
@@ -178,6 +178,147 @@ def test_editable_fields_report_value_but_passwords_do_not(driver: ATSPIDriver) 
     assert [e.value for e in tree.elements] == [None, "Ada", None, None]
     assert "= 'Ada'" in tree.to_markdown()
     assert "hunter2" not in tree.to_markdown()
+
+
+def test_offscreen_subtrees_are_skipped_and_counted(driver: ATSPIDriver) -> None:
+    window = Node("frame", "List", rect=(0, 0, 300, 200), children=[
+        Node("list", rect=(0, 0, 300, 2000), children=[
+            Node("list item", f"row {i}", rect=(0, i * 50, 300, 50)) for i in range(40)
+        ]),
+        Node("filler", rect=(0, 0, 0, 0), children=[Node("push button", "OK")]),  # sizeless container
+    ])
+    tree = driver.read_tree(window, window_id=1)
+    rows = [e.name for e in tree.elements if e.role == "list item"]
+    assert rows == ["row 0", "row 1", "row 2", "row 3"]  # y < 200
+    assert tree.offscreen == 36
+    assert any(e.name == "OK" for e in tree.elements)
+    assert "36 elements outside the visible area" in tree.to_markdown()
+
+
+def test_window_taller_than_screen_is_clipped_to_screen(driver: ATSPIDriver) -> None:
+    window = Node("frame", "Tall", rect=(0, 0, 300, 5000), children=[
+        Node("push button", f"b{i}", rect=(0, i * 100, 300, 100)) for i in range(50)
+    ])
+    tree = driver.read_tree(window, window_id=1, screen=(0, 0, 1280, 800))
+    assert len(tree.elements) == 1 + 8  # frame + rows with y < 800
+    assert tree.offscreen == 42
+
+
+def test_big_containers_fetch_showing_children_in_one_query(
+    driver: ATSPIDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        Node("list item", f"row {i}", states=("showing",) if i < 5 else ("visible",))
+        for i in range(100)
+    ]
+    big = Node("list", children=rows)
+    queries = []
+
+    class Collection:
+        def get_matches(self, rule, order, count, traverse):
+            queries.append((count, traverse))
+            return [r for r in rows if "showing" in r.states]
+
+    big.get_collection_iface = lambda: Collection()  # type: ignore[method-assign]
+    big.get_child_at_index = lambda i: pytest.fail("should not fetch children one by one")  # type: ignore[method-assign]
+    fake = driver._atspi
+    fake.MatchRule = SimpleNamespace(new=lambda *a: a)  # type: ignore[union-attr]
+    fake.StateSet = SimpleNamespace(new=lambda s: s)  # type: ignore[union-attr]
+    fake.StateType = SimpleNamespace(SHOWING="showing")  # type: ignore[union-attr]
+    fake.CollectionMatchType = SimpleNamespace(ALL=0, ANY=1)  # type: ignore[union-attr]
+    fake.CollectionSortOrder = SimpleNamespace(CANONICAL=0)  # type: ignore[union-attr]
+
+    tree = driver.read_tree(Node("frame", children=[big]), window_id=1)
+    assert [e.name for e in tree.elements if e.role == "list item"] == [f"row {i}" for i in range(5)]
+    assert queries == [(0, False)]  # one query, direct children only
+
+    # Without Collection support, fall back to fetching children one by one.
+    del big.get_child_at_index
+    big.get_collection_iface = lambda: None  # type: ignore[method-assign]
+    tree = driver.read_tree(Node("frame", children=[big]), window_id=1)
+    assert len([e for e in tree.elements if e.role == "list item"]) == 5
+
+
+def _with_collection(node: Node, matches: list[Any]) -> Node:
+    class Collection:
+        def get_matches(self, rule, order, count, traverse):
+            return matches[:count] if count else matches
+
+    node.get_collection_iface = lambda: Collection()  # type: ignore[method-assign]
+    return node
+
+
+def _fake_collection_api(driver: ATSPIDriver) -> None:
+    fake = driver._atspi
+    fake.MatchRule = SimpleNamespace(new=lambda *a: a)  # type: ignore[union-attr]
+    fake.StateSet = SimpleNamespace(new=lambda s: s)  # type: ignore[union-attr]
+    fake.StateType = SimpleNamespace(SHOWING="showing")  # type: ignore[union-attr]
+    fake.CollectionMatchType = SimpleNamespace(ALL=0, ANY=1)  # type: ignore[union-attr]
+    fake.CollectionSortOrder = SimpleNamespace(CANONICAL=0)  # type: ignore[union-attr]
+
+
+def test_unshowing_container_with_showing_rows_is_walked(driver: ATSPIDriver) -> None:
+    """GTK 3 scrolled viewports lose "showing" (and their position) after a scroll."""
+    _fake_collection_api(driver)
+    rows = [Node("push button", f"Row {i}") for i in range(3)]
+    viewport = _with_collection(
+        Node("viewport", states=("visible",), rect=(-(1 << 31), -(1 << 31), 360, 150),
+             children=[Node("filler", children=rows)]),
+        matches=rows,
+    )
+    hidden_tab = _with_collection(
+        Node("page tab", "Settings", states=("visible",), children=[Node("push button", "Secret")]),
+        matches=[],
+    )
+    window = Node("frame", rect=(0, 0, 400, 300), children=[viewport, hidden_tab])
+    names = [e.name for e in driver.read_tree(window, window_id=1).elements]
+    assert names[-3:] == ["Row 0", "Row 1", "Row 2"]
+    assert "Settings" not in names and "Secret" not in names
+
+
+def test_refresh_rereads_one_element(driver: ATSPIDriver) -> None:
+    button = Node("push button", "Save", actions=["click"], rect=(5, 5, 20, 10))
+    fresh = driver.refresh(button, window_id=3, index=4, parent=1)
+    assert fresh is not None
+    assert (fresh.index, fresh.role, fresh.name, fresh.parent_index) == (4, "push button", "Save", 1)
+    assert (fresh.x, fresh.width, fresh.actions) == (5, 20, ["click"])
+
+    button.name = "Delete"
+    assert driver.refresh(button, 3, 4, 1).name == "Delete"  # type: ignore[union-attr]
+    button.states = ("visible",)
+    assert driver.refresh(button, 3, 4, 1) is None  # no longer showing
+    button.states = ("showing", "defunct")
+    assert driver.refresh(button, 3, 4, 1) is None
+    assert driver.refresh(Broken("x"), 3, 4, 1) is None  # app gone
+
+
+def test_find_sensitive_uses_collection(driver: ATSPIDriver) -> None:
+    calls = []
+
+    class Collection:
+        def __init__(self, found: bool) -> None:
+            self.found = found
+
+        def get_matches(self, rule, order, count, traverse):
+            calls.append((rule, count, traverse))
+            return [object()] if self.found else []
+
+    fake = driver._atspi
+    fake.MatchRule = SimpleNamespace(new=lambda *a: ("rule", a[4]))  # type: ignore[union-attr]
+    fake.StateSet = SimpleNamespace(new=lambda s: s)  # type: ignore[union-attr]
+    fake.StateType = SimpleNamespace(SHOWING="showing")  # type: ignore[union-attr]
+    fake.Role = SimpleNamespace(PASSWORD_TEXT="password")  # type: ignore[union-attr]
+    fake.CollectionMatchType = SimpleNamespace(ALL=0, ANY=1)  # type: ignore[union-attr]
+    fake.CollectionSortOrder = SimpleNamespace(CANONICAL=0)  # type: ignore[union-attr]
+
+    root = Node("frame")
+    root.get_collection_iface = lambda: Collection(found=True)  # type: ignore[method-assign]
+    assert driver.find_sensitive(root) == ["password field"]
+    root.get_collection_iface = lambda: Collection(found=False)  # type: ignore[method-assign]
+    assert driver.find_sensitive(root) == []
+    assert calls[0] == (("rule", ["password"]), 1, True)
+    root.get_collection_iface = lambda: None  # type: ignore[method-assign]
+    assert driver.find_sensitive(root) is None  # caller falls back to a walk
 
 
 def test_password_field_marks_tree_sensitive(driver: ATSPIDriver) -> None:

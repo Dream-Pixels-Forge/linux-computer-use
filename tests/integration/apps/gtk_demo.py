@@ -1,7 +1,8 @@
 """Tiny GTK 3 app used as an accessible target by the integration tests.
 
 Run with a Python that has PyGObject + GTK 3 (e.g. /usr/bin/python3 with
-python3-gi and gir1.2-gtk-3.0):  python3 gtk_demo.py "Title" [--password]
+python3-gi and gir1.2-gtk-3.0):
+    python3 gtk_demo.py "Title" [--password] [--rows N]
 """
 
 import sys
@@ -33,6 +34,18 @@ def on_click(_button: Gtk.Button) -> None:
 button.connect("clicked", on_click)
 for widget in (label, entry, check, button):
     box.pack_start(widget, False, False, 0)
+if "--rows" in sys.argv:
+    # A long scrolled list: most rows start out of view.
+    rows = int(sys.argv[sys.argv.index("--rows") + 1])
+    listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    for i in range(rows):
+        row = Gtk.Button(label=f"Row {i}")
+        row.connect("clicked", lambda _b, i=i: label.set_text(f"Picked {i}"))
+        listing.pack_start(row, False, False, 0)
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_min_content_height(150)
+    scroller.add(listing)
+    box.pack_start(scroller, True, True, 0)
 if "--password" in sys.argv:
     secret = Gtk.Entry()
     secret.set_visibility(False)

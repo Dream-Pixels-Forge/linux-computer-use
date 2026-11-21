@@ -70,6 +70,14 @@ def demo() -> Iterator[int]:
 
 
 @pytest.fixture
+def long_list() -> Iterator[int]:
+    proc, window_id = _start_app("LCU List", "--rows", "500")
+    yield window_id
+    proc.kill()
+    proc.wait()
+
+
+@pytest.fixture
 def login() -> Iterator[int]:
     proc, window_id = _start_app("LCU Login", "--password")
     yield window_id
@@ -165,3 +173,34 @@ async def _check_password_window(client: Client, login: int) -> None:
     button = _find(state, "push button", "Count")
     refused = await client.call_tool("click", {"window_id": login, "element": button["index"]})
     assert refused.is_error
+
+
+async def test_long_list_shows_only_visible_rows_and_scrolls(long_list: int) -> None:
+    async with _server() as client:
+        await _check_long_list(client, long_list)
+
+
+async def _check_long_list(client: Client, window_id: int) -> None:
+    state = await _state(client, window_id)
+    rows = [e for e in state["elements"] if e["name"].startswith("Row ")]
+    assert 0 < len(rows) < 50, len(rows)  # only what fits on screen, not all 500
+    assert not state["truncated"]
+    assert _find(state, "push button", "Row 0")
+    first_rows = {e["name"] for e in rows}
+
+    # Rows below the fold appear after scrolling, and can then be clicked.
+    scroller = next(e for e in state["elements"] if e["role"] == "scroll pane")
+    await _act(client, "scroll", {
+        "window_id": window_id, "direction": "down", "amount": 10, "element": scroller["index"],
+    })
+    time.sleep(0.3)
+    scrolled = await _state(client, window_id)
+    later = [e for e in scrolled["elements"] if e["name"].startswith("Row ")]
+    new_rows = [e for e in later if e["name"] not in first_rows]
+    assert new_rows, "scrolling revealed no new rows"
+
+    target = new_rows[0]
+    await _act(client, "click", {"window_id": window_id, "element": target["index"]})
+    time.sleep(0.2)
+    picked = await _state(client, window_id)
+    assert _find(picked, "label", f"Picked {target['name'].split()[1]}")
