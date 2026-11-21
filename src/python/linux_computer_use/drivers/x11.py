@@ -22,6 +22,9 @@ class X11Driver(Driver):
         # Accessibles from the most recent tree read, keyed by (window_id, index),
         # so actions can use AT-SPI on exactly the element the caller saw.
         self._accessibles: dict[tuple[int, int], Any] = {}
+        self._parents: dict[tuple[int, int], int] = {}
+        self._roots: dict[int, Any] = {}
+        self._screen: tuple[int, int, int, int] | None = None
 
     def connect(self) -> bool:
         """Connect to X11 server."""
@@ -61,31 +64,57 @@ class X11Driver(Driver):
             window_ids = [int(w) for w in result.stdout.split() if w.isdigit()]
 
             for win_id in window_ids:
-
-                # Get window geometry
-                geom = self._get_window_geometry(win_id)
-
-                # Get window name
-                name = self._get_window_name(win_id)
-
-                windows.append(Window(
-                    window_id=win_id,
-                    pid=geom.get("pid", 0) if geom else 0,
-                    app_id="",
-                    title=name or "Unknown",
-                    x=geom.get("x", 0) if geom else 0,
-                    y=geom.get("y", 0) if geom else 0,
-                    width=geom.get("width", 0) if geom else 0,
-                    height=geom.get("height", 0) if geom else 0,
-                    workspace=0,
-                    visible=True,
-                    app=""
-                ))
+                window = self.get_window(win_id)
+                if window is not None:
+                    windows.append(window)
 
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
         return windows
+
+    def get_window(self, window_id: int) -> Window | None:
+        """Look up one window (one xdotool call), or None if it no longer exists.
+
+        Much cheaper than list_windows on a busy desktop, which costs one call
+        per open window.
+        """
+        info = self._query_window(window_id)
+        if info is None:
+            return None
+        geom, title, pid = info
+        return Window(
+            window_id=window_id,
+            pid=pid,
+            app_id="",
+            title=title or "Unknown",
+            x=geom.get("x", 0),
+            y=geom.get("y", 0),
+            width=geom.get("width", 0),
+            height=geom.get("height", 0),
+            workspace=0,
+            visible=True,
+            app="",
+        )
+
+    def _query_window(self, window_id: int) -> tuple[dict[str, int], str, int] | None:
+        """Geometry, title and PID of a window in a single chained xdotool call.
+
+        Output is the ``--shell`` geometry block (ending ``SCREEN=n``), then the
+        title, then the PID. xdotool stops the chain with an error when a
+        window has no PID, after printing the rest, so that case reads as
+        PID 0. Returns None if the window doesn't exist.
+        """
+        wid = str(window_id)
+        try:
+            result = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", wid,
+                 "getwindowname", wid, "getwindowpid", wid],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        return parse_window_query(result.stdout, result.returncode)
 
     def _get_window_geometry(self, window_id: int) -> dict[str, int] | None:
         """Get window geometry using xdotool."""
@@ -154,9 +183,8 @@ class X11Driver(Driver):
         if not self._connected:
             self.connect()
 
-        geom = self._get_window_geometry(window_id) or {}
-        pid = geom.get("pid", 0)
-        title = self._get_window_name(window_id) or ""
+        info = self._query_window(window_id)
+        geom, title, pid = info if info is not None else ({}, "", 0)
         rect = (
             (geom["x"], geom["y"], geom["width"], geom["height"])
             if {"x", "y", "width", "height"} <= geom.keys()
@@ -165,13 +193,21 @@ class X11Driver(Driver):
 
         for key in [k for k in self._accessibles if k[0] == window_id]:
             del self._accessibles[key]
+            self._parents.pop(key, None)
+        self._roots.pop(window_id, None)
 
         root = self.atspi.find_window(pid, title, rect)
         if root is not None:
-            tree = self.atspi.read_tree(root, window_id)
+            tree = self.atspi.read_tree(root, window_id, self._screen_rect())
             if tree.elements:
+                self._roots[window_id] = root
                 for element, accessible in zip(tree.elements, tree.accessibles, strict=True):
                     self._accessibles[(window_id, element.index)] = accessible
+                    self._parents[(window_id, element.index)] = element.parent_index
+                if not tree.sensitive and self.atspi.find_sensitive(root):
+                    # The walk skips off-screen content; the Collection query doesn't.
+                    tree.sensitive = True
+                    tree.sensitive_reasons.append("password field (outside the visible area)")
                 return WindowState(
                     window_id=window_id,
                     pid=pid,
@@ -182,6 +218,7 @@ class X11Driver(Driver):
                     sensitive=tree.sensitive,
                     sensitive_reasons=tree.sensitive_reasons,
                     truncated=tree.truncated,
+                    offscreen=tree.offscreen,
                 )
 
         elements = []
@@ -205,6 +242,55 @@ class X11Driver(Driver):
             elements=elements,
             source="x11",
         )
+
+    def _screen_rect(self) -> tuple[int, int, int, int] | None:
+        """The whole X screen as (0, 0, width, height), cached after the first call."""
+        if self._screen is None:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "getdisplaygeometry"], capture_output=True, text=True, timeout=5
+                )
+                width, height = (int(v) for v in result.stdout.split())
+                self._screen = (0, 0, width, height)
+            except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+                return None
+        return self._screen
+
+    def resolve_element(self, window_id: int, index: int) -> Element | None:
+        """Re-read one element from the last get_window_state, without a walk.
+
+        Returns None if the element is unknown, gone or no longer showing.
+        For windows without an accessibility tree only index 0 (the window
+        itself) exists, rebuilt from the current geometry.
+        """
+        accessible = self._accessibles.get((window_id, index))
+        if accessible is not None:
+            parent = self._parents.get((window_id, index), -1)
+            return self.atspi.refresh(accessible, window_id, index, parent)
+        if index != 0 or window_id in self._roots:
+            return None
+        window = self.get_window(window_id)
+        if window is None:
+            return None
+        return Element(
+            index=0, role="window", name=window.title,
+            x=window.x, y=window.y, width=window.width, height=window.height,
+            window_id=window_id,
+        )
+
+    def check_sensitive(self, window_id: int) -> list[str]:
+        """Reasons the window is sensitive (e.g. a password field), or [].
+
+        One AT-SPI Collection query on the window's accessible; falls back to
+        a full tree read if the app doesn't support Collection.
+        """
+        root = self._roots.get(window_id)
+        if root is None:
+            return self.get_window_state(window_id).sensitive_reasons
+        reasons = self.atspi.find_sensitive(root)
+        if reasons is None:
+            return self.get_window_state(window_id).sensitive_reasons
+        return reasons
 
     def click(self, element: Element) -> bool:
         """Click an element.
@@ -350,3 +436,24 @@ class X11Driver(Driver):
             if result.returncode == 0:
                 return True
         return False
+
+
+def parse_window_query(stdout: str, returncode: int) -> tuple[dict[str, int], str, int] | None:
+    """Parse ``xdotool getwindowgeometry --shell W getwindowname W getwindowpid W``."""
+    lines = stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    end = next((i for i, line in enumerate(lines) if line.startswith("SCREEN=")), None)
+    if end is None:
+        return None  # no such window
+    fields = dict(line.split("=", 1) for line in lines[:end] if "=" in line)
+    keys = {"X": "x", "Y": "y", "WIDTH": "width", "HEIGHT": "height"}
+    try:
+        geom = {name: int(fields[key]) for key, name in keys.items() if key in fields}
+    except ValueError:
+        return None
+    rest = lines[end + 1:]
+    pid = 0
+    if returncode == 0 and rest and rest[-1].isdigit():
+        pid = int(rest.pop())
+    return geom, "\n".join(rest), pid

@@ -45,6 +45,13 @@ REPORTED_STATES = (
     "editable", "pressed", "active", "modal", "multi-line", "required",
 )
 
+#: Containers with more children than this fetch only their showing children
+#: in one Collection query instead of one call per child (big lists, grids).
+BULK_CHILDREN = 32
+
+#: Coordinates at or below this mean "no position" (toolkits report INT_MIN).
+_NO_POSITION = -(1 << 30)
+
 #: Longest field value reported, in characters.
 MAX_VALUE_CHARS = 500
 
@@ -62,6 +69,8 @@ class AccessibleTree:
     truncated: bool = False
     sensitive: bool = False
     sensitive_reasons: list[str] = field(default_factory=list)
+    #: Elements skipped because they lie entirely outside the window.
+    offscreen: int = 0
 
     def to_markdown(self) -> str:
         """Render as an indented list an agent can read."""
@@ -79,6 +88,11 @@ class AccessibleTree:
             if element.state:
                 line += f" {{{', '.join(element.state)}}}"
             lines.append(line)
+        if self.offscreen:
+            lines.append(
+                f"... ({self.offscreen} elements outside the visible area not shown; "
+                "scroll to bring them into view)"
+            )
         if self.truncated:
             lines.append(f"... (tree truncated at {len(self.elements)} elements)")
         return "\n".join(lines)
@@ -149,28 +163,129 @@ class ATSPIDriver:
             rect = component.get_extents(self._atspi.CoordType.SCREEN)  # type: ignore[union-attr]
         except Exception:
             return None
+        if rect.x <= _NO_POSITION or rect.y <= _NO_POSITION:
+            return None  # toolkit has no position for it (e.g. a scrolled GTK viewport)
         return (rect.x, rect.y, rect.width, rect.height)
 
-    def read_tree(self, root: Any, window_id: int) -> AccessibleTree:
-        """Flatten the visible part of an accessible tree, depth first."""
+    def read_tree(
+        self,
+        root: Any,
+        window_id: int,
+        screen: tuple[int, int, int, int] | None = None,
+    ) -> AccessibleTree:
+        """Flatten the visible part of an accessible tree, depth first.
+
+        Skips hidden subtrees and subtrees lying entirely outside the window
+        (e.g. rows of a long list below the fold), which nothing can click
+        and which dominate the cost of reading large windows.
+        """
         tree = AccessibleTree(elements=[], accessibles=[], depths=[])
-        self._walk(root, window_id, -1, 0, tree)
+        clip = self.extents(root)
+        if clip is not None and (clip[2] <= 0 or clip[3] <= 0):
+            clip = None
+        if screen is not None:
+            # A window taller than the screen (no scroller) is only visible on screen.
+            clip = _intersect(clip, screen) if clip is not None else screen
+        self._walk(root, window_id, -1, 0, tree, clip)
         return tree
 
     def _walk(
-        self, node: Any, window_id: int, parent: int, depth: int, tree: AccessibleTree
+        self,
+        node: Any,
+        window_id: int,
+        parent: int,
+        depth: int,
+        tree: AccessibleTree,
+        clip: tuple[int, int, int, int] | None,
     ) -> None:
         if len(tree.elements) >= MAX_ELEMENTS:
             tree.truncated = True
             return
         states = _state_nicks(node)
-        if parent >= 0 and "showing" not in states:
+        if parent >= 0 and "showing" not in states and not self._has_showing_descendant(node):
             return  # hidden subtree (collapsed menu, inactive tab, ...)
+        rect = self.extents(node) or (0, 0, 0, 0)
+        if parent >= 0 and clip is not None and not _overlaps(rect, clip):
+            tree.offscreen += 1
+            return
 
         index = len(tree.elements)
+        element = self._element(node, window_id, index, parent, states, rect)
+        if element.role in PASSWORD_ROLES:
+            tree.sensitive = True
+            tree.sensitive_reasons.append(f"password field [{index}]")
+
+        tree.elements.append(element)
+        tree.accessibles.append(node)
+        tree.depths.append(depth)
+        if parent >= 0:
+            tree.elements[parent].children.append(index)
+
+        if depth >= MAX_DEPTH:
+            return
+        for child in self._showing_children(node):
+            self._walk(child, window_id, index, depth + 1, tree, clip)
+
+    def _showing_rule(self) -> Any:
+        atspi = self._atspi
+        return atspi.MatchRule.new(  # type: ignore[union-attr]
+            atspi.StateSet.new([atspi.StateType.SHOWING]),  # type: ignore[union-attr]
+            atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+            {},
+            atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+            [],
+            atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+            [],
+            atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+            False,
+        )
+
+    def _has_showing_descendant(self, node: Any) -> bool:
+        """Whether a container that isn't "showing" still holds showing widgets.
+
+        GTK 3 drops the showing state from a scrolled viewport while the rows
+        inside it are on screen; trusting the container would hide them all.
+        A hidden tab page has no showing descendants, so it is still skipped.
+        One Collection query; without Collection, trust the container.
+        """
+        if self._atspi is None:
+            return False
+        try:
+            collection = node.get_collection_iface()
+            if collection is None:
+                return False
+            order = self._atspi.CollectionSortOrder.CANONICAL
+            return bool(collection.get_matches(self._showing_rule(), order, 1, True))
+        except Exception:
+            return False
+
+    def _showing_children(self, node: Any) -> list[Any]:
+        """Children worth walking. For big containers, ask the app for only the
+        showing ones in a single Collection query (a scrolled list of 1000 rows
+        typically has a few dozen showing); otherwise fetch them one by one."""
+        count = _safe(node.get_child_count, 0)
+        if count > BULK_CHILDREN and self._atspi is not None:
+            try:
+                collection = node.get_collection_iface()
+                if collection is not None:
+                    order = self._atspi.CollectionSortOrder.CANONICAL
+                    return list(collection.get_matches(self._showing_rule(), order, 0, False))
+            except Exception:
+                pass  # fall back to one call per child
+        return _children(node)
+
+    def _element(
+        self,
+        node: Any,
+        window_id: int,
+        index: int,
+        parent: int,
+        states: set[str],
+        rect: tuple[int, int, int, int],
+    ) -> Element:
         role = _safe(node.get_role_name, "unknown")
-        x, y, w, h = self.extents(node) or (0, 0, 0, 0)
-        element = Element(
+        x, y, w, h = rect
+        return Element(
             index=index,
             role=role,
             name=_safe(node.get_name, "") or "",
@@ -187,20 +302,53 @@ class ATSPIDriver:
                 else None
             ),
         )
-        if role in PASSWORD_ROLES:
-            tree.sensitive = True
-            tree.sensitive_reasons.append(f"password field [{index}]")
 
-        tree.elements.append(element)
-        tree.accessibles.append(node)
-        tree.depths.append(depth)
-        if parent >= 0:
-            tree.elements[parent].children.append(index)
+    def refresh(self, node: Any, window_id: int, index: int, parent: int) -> Element | None:
+        """Re-read one element from its live accessible, without walking the tree.
 
-        if depth >= MAX_DEPTH:
-            return
-        for child in _children(node):
-            self._walk(child, window_id, index, depth + 1, tree)
+        Returns None if the widget is gone or no longer showing, so callers
+        never act on something the user can't see.
+        """
+        states = _state_nicks(node)
+        if not states or "defunct" in states:
+            return None
+        if index != 0 and "showing" not in states:
+            return None
+        return self._element(
+            node, window_id, index, parent, states, self.extents(node) or (0, 0, 0, 0)
+        )
+
+    def find_sensitive(self, root: Any) -> list[str] | None:
+        """Look for a showing password field anywhere under root in one query.
+
+        Uses the AT-SPI Collection interface, which the app answers itself.
+        Returns None when the app doesn't support Collection, so the caller
+        can fall back to walking the tree.
+        """
+        if not self.connect():
+            return None
+        atspi = self._atspi
+        try:
+            collection = root.get_collection_iface()
+            if collection is None:
+                return None
+            rule = atspi.MatchRule.new(  # type: ignore[union-attr]
+                atspi.StateSet.new([atspi.StateType.SHOWING]),  # type: ignore[union-attr]
+                atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+                {},
+                atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+                [atspi.Role.PASSWORD_TEXT],  # type: ignore[union-attr]
+                atspi.CollectionMatchType.ANY,  # type: ignore[union-attr]
+                [],
+                atspi.CollectionMatchType.ALL,  # type: ignore[union-attr]
+                False,
+            )
+            matches = collection.get_matches(
+                rule, atspi.CollectionSortOrder.CANONICAL, 1, True  # type: ignore[union-attr]
+            )
+        except Exception:
+            return None
+        return ["password field"] if matches else []
 
     def _text_value(self, node: Any) -> str | None:
         """Current text of an editable field, via the AT-SPI Text interface.
@@ -270,6 +418,24 @@ def match_window(
         if len(group) >= 1:
             return group[0]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """True if rect a intersects rect b. Zero-size rects count as overlapping:
+    many containers report no size while their children do."""
+    ax, ay, aw, ah = a
+    if aw <= 0 or ah <= 0:
+        return True
+    bx, by, bw, bh = b
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def _intersect(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    return (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
 
 
 def _children(node: Any) -> list[Any]:

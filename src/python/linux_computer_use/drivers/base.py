@@ -100,6 +100,8 @@ class WindowState:
     sensitive: bool = False
     sensitive_reasons: list[str] = field(default_factory=list)
     truncated: bool = False
+    #: Elements skipped because they lie outside the window's visible area.
+    offscreen: int = 0
 
 
 class Driver(ABC):

@@ -34,7 +34,10 @@ class DesktopDriver(Protocol):
 
     def connect(self) -> bool: ...
     def list_windows(self) -> list[Window]: ...
+    def get_window(self, window_id: int) -> Window | None: ...
     def get_window_state(self, window_id: int) -> WindowState: ...
+    def resolve_element(self, window_id: int, index: int) -> Element | None: ...
+    def check_sensitive(self, window_id: int) -> list[str]: ...
     def click(self, element: Element) -> bool: ...
     def click_coordinate(self, x: int, y: int) -> bool: ...
     def type_text(self, text: str, element: Element) -> bool: ...
@@ -80,10 +83,10 @@ def set_driver(driver: DesktopDriver | None) -> None:
 
 
 def _find_window(driver: DesktopDriver, window_id: int) -> Window:
-    for window in driver.list_windows():
-        if window.window_id == window_id:
-            return window
-    raise ToolError(f"Window {window_id} not found. Call list_windows for valid ids.")
+    window = driver.get_window(window_id)
+    if window is None:
+        raise ToolError(f"Window {window_id} not found. Call list_windows for valid ids.")
+    return window
 
 
 # What each window looked like when the client last read it:
@@ -96,57 +99,59 @@ def _remember(state: WindowState) -> None:
     _snapshots[state.window_id] = {e.index: (e.role, e.name) for e in state.elements}
 
 
-def _refuse_if_sensitive(state: WindowState) -> None:
-    if state.sensitive:
-        reasons = ", ".join(state.sensitive_reasons) or "sensitive input"
+def _refuse_if_sensitive(window_id: int, reasons: list[str]) -> None:
+    if reasons:
         raise ToolError(
-            f"Window {state.window_id} contains a {reasons}. linux-computer-use does not "
+            f"Window {window_id} contains a {', '.join(reasons)}. linux-computer-use does not "
             "interact with windows that ask for secrets; ask the user to complete this step."
         )
 
 
-def _window_state(driver: DesktopDriver, window_id: int, *, acting: bool) -> WindowState:
-    _find_window(driver, window_id)
-    state = driver.get_window_state(window_id)
+def _check_window(driver: DesktopDriver, window_id: int, *, acting: bool) -> Window:
+    """The window must exist; before input, it must not ask for secrets."""
+    window = _find_window(driver, window_id)
     if acting:
-        _refuse_if_sensitive(state)
-    return state
+        _refuse_if_sensitive(window_id, driver.check_sensitive(window_id))
+    return window
 
 
 def _find_element(
     driver: DesktopDriver, window_id: int, index: int, *, acting: bool = True
 ) -> Element:
-    """Resolve an element index against a fresh tree, refusing stale targets.
+    """Resolve an element index from the last get_window_state, refusing stale targets.
 
     Index 0 (the window itself) is always valid. Any other index must come
-    from a get_window_state call, and the element at that index must still
-    have the same role and name, so a UI change can't redirect an action
-    to a different control.
+    from a get_window_state call, and the same widget must still be showing
+    with the same role and name, so a UI change can't redirect an action to
+    a different control. Only that one element is re-read, not the tree.
     """
-    state = _window_state(driver, window_id, acting=acting)
-    element = next((e for e in state.elements if e.index == index), None)
+    _check_window(driver, window_id, acting=acting)
+    seen = _snapshots.get(window_id)
     if index != 0:
-        seen = _snapshots.get(window_id)
         if seen is None:
             raise ToolError(
                 f"Call get_window_state({window_id}) first; element indexes come from it."
             )
         expected = seen.get(index)
-        actual = (element.role, element.name) if element else None
         if expected is None:
             raise ToolError(f"Element {index} was not in the last get_window_state result.")
-        if actual != expected:
-            now = f'{actual[0]} "{actual[1]}"' if actual else "gone"
+        element = driver.resolve_element(window_id, index)
+        actual = (element.role, element.name) if element else None
+        if element is None or actual != expected:
+            now = f'{actual[0]} "{actual[1]}"' if actual else "gone or no longer visible"
             raise ToolError(
                 f'Element {index} changed since get_window_state (was {expected[0]} '
                 f'"{expected[1]}", now {now}). Call get_window_state again.'
             )
-    if element is None:
-        raise ToolError(
-            f"Element {index} not found in window {window_id}. "
-            "Call get_window_state for a fresh element list."
-        )
-    return element
+        return element
+
+    root = driver.resolve_element(window_id, 0) if seen is not None else None
+    if root is None:
+        state = driver.get_window_state(window_id)
+        root = next((e for e in state.elements if e.index == 0), None)
+    if root is None:
+        raise ToolError(f"Window {window_id} has no elements.")
+    return root
 
 
 def _audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -257,7 +262,8 @@ def get_window_state(window_id: int) -> dict[str, Any]:
     screenshot_element take. Call it again after the UI changes.
     """
     driver = get_driver()
-    state = _window_state(driver, window_id, acting=False)
+    _find_window(driver, window_id)
+    state = driver.get_window_state(window_id)
     _remember(state)
     return _audit(
         "get_window_state",
@@ -270,6 +276,7 @@ def get_window_state(window_id: int) -> dict[str, Any]:
             "sensitive": state.sensitive,
             "sensitive_reasons": state.sensitive_reasons,
             "truncated": state.truncated,
+            "offscreen": state.offscreen,
             "tree_markdown": state.tree_markdown,
             "elements": [e.to_dict() for e in state.elements],
         },
@@ -320,7 +327,7 @@ def click(
         window = _find_window(driver, window_id)
         if not (window.x <= x < window.x + window.width and window.y <= y < window.y + window.height):
             raise ToolError(f"Point ({x}, {y}) is outside window {window_id}.")
-        _window_state(driver, window_id, acting=True)
+        _check_window(driver, window_id, acting=True)
         success = driver.click_coordinate(x, y)
     else:
         raise ToolError("Give an element index, or both x and y.")
@@ -362,13 +369,13 @@ def press_key(keys: str, window_id: int | None = None) -> dict[str, Any]:
     """
     driver = get_driver()
     if window_id is not None:
-        _window_state(driver, window_id, acting=True)
+        _check_window(driver, window_id, acting=True)
         if not driver.focus_window(window_id):
             raise ToolError(f"Could not focus window {window_id}.")
     else:
         focused = driver.get_focused_window()
         if focused is not None:
-            _refuse_if_sensitive(driver.get_window_state(focused))
+            _refuse_if_sensitive(focused, driver.check_sensitive(focused))
     success = driver.press_key(keys)
     return _audit(
         "press_key",

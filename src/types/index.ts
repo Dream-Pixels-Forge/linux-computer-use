@@ -160,6 +160,8 @@ export interface WindowStateResult {
   sensitive_reasons: string[];
   /** True when the tree was cut off at the element limit. */
   truncated: boolean;
+  /** Elements skipped because they lie outside the window's visible area; scroll to reveal them. */
+  offscreen: number;
   tree_markdown: string;
   elements: Element[];
 }
