@@ -1,6 +1,6 @@
 # Wayland phase 2: implementation plan
 
-**Status:** proposed
+**Status:** 2a, 2b and 2c implemented; 2d not started
 **Date:** 2026-11-22
 **Builds on:** [wayland.md](wayland.md), "Phase 2: portal input"
 
@@ -9,6 +9,29 @@ parts that need the compositor's consent: screenshots, key presses, scrolling
 and clicks by position, all through xdg-desktop-portal. This plan splits the
 work into slices that each ship on their own, ordered so that nothing waits on
 the open GNOME focus check except keyboard input itself.
+
+## What was built, and where it differs from the plan
+
+- **2a** is `drivers/portal.py`. The restore token is kept in a `0600` file
+  under `$XDG_STATE_HOME/linux-computer-use/` (directory `0700`), not yet in
+  libsecret: the file needs no extra typelib and works headless. Moving it to
+  the secret store is a small follow-up.
+- **2b**: the screenshot is moved out of wherever the portal saved it (GNOME
+  saves to `~/Pictures/Screenshots`) into the session's private temp dir, so
+  no copy is left behind. `screenshot_desktop` refuses while any window shows
+  a password field on Wayland. On both drivers, `screenshot_window` and
+  `screenshot_element` now refuse for a window that shows one. Desktop-wide
+  refusal on X11 is left out: X11's check reads each window's whole tree when
+  it isn't cached, which would make every desktop screenshot slow.
+- **2c**: keyboard input is enabled on GNOME. The user ran
+  `tests/manual/focus_check.py` on their GNOME Wayland machine on 2026-11-22
+  and reported that it passes: exactly one window claimed focus at each step,
+  and it was the one they were in. The raw output wasn't recorded. KDE and
+  wlroots stay off (`KEYBOARD_VERIFIED_DESKTOPS` in `drivers/wayland.py`)
+  until the same check passes there; `LCU_WAYLAND_KEYBOARD_UNVERIFIED=1` is
+  the operator override.
+- Known gap from the check: Chrome and Electron apps report no focus unless
+  started with accessibility on, so keys to them are refused, never guessed.
 
 ## Ground rules
 

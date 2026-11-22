@@ -1,6 +1,6 @@
 # Wayland support: options and recommendation
 
-**Status:** phases 0 and 1 implemented; phases 2 and 3 proposed
+**Status:** phases 0 and 1 implemented; phase 2 partly implemented (screenshots and keyboard, see [wayland-phase2.md](wayland-phase2.md)); phase 3 proposed
 **Date:** 2026-11-21
 **Scope:** how `linux-computer-use` can list, read, act on and screenshot windows
 on a Wayland desktop. Today `drivers/wayland.py` is a stub: it lists no windows,
@@ -213,7 +213,7 @@ possibly in another app. This is the same window-relative model Wayland needs.
 - CI: a job running the existing GTK live tests under `weston --backend=headless`
   (shown to work in this container).
 
-**Phase 2: portal input.** RemoteDesktop + ScreenCast sessions through
+**Phase 2: portal input.** *(Screenshots and keyboard implemented; pointer pending.)* RemoteDesktop + ScreenCast sessions through
 libei (`snegg`/`oeffis`), restore tokens stored per user in the session's
 secret store, and clear errors when the user declines or the token is
 rejected. Window origins: KWin script and ScreenCast-frame matching first;

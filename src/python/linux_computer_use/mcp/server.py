@@ -47,6 +47,7 @@ class DesktopDriver(Protocol):
     def scroll(self, direction: str, amount: int, element: Element) -> bool: ...
     def focus_window(self, window_id: int) -> bool: ...
     def get_focused_window(self) -> int | None: ...
+    def screenshot_window(self, window_id: int) -> str: ...
     def screenshot_desktop(self, region: tuple[int, int, int, int] | None = None) -> str: ...
 
 
@@ -136,7 +137,7 @@ def _refuse_if_sensitive(window_id: int, reasons: list[str]) -> None:
     if reasons:
         raise ToolError(
             f"Window {window_id} contains a {', '.join(reasons)}. linux-computer-use does not "
-            "interact with windows that ask for secrets; ask the user to complete this step."
+            "act on or capture windows that ask for secrets; ask the user to complete this step."
         )
 
 
@@ -467,6 +468,14 @@ def scroll(
     )
 
 
+def _require_screen_positions(driver: DesktopDriver, window_id: int) -> None:
+    """Cropping a window out of the desktop needs its screen position. Drivers
+    that don't know it (Wayland) explain why through screenshot_window."""
+    if not getattr(driver, "positions_on_screen", True):
+        driver.screenshot_window(window_id)  # raises NotSupportedError
+        raise ToolError("This driver can't locate windows on screen.")
+
+
 def _image_result(tool: str, args: dict[str, Any], path: Path) -> list[Any]:
     _audit(tool, args, {"effect": "success"})
     return [Image(path=path), json.dumps({"path": str(path), **args})]
@@ -484,7 +493,18 @@ def screenshot_desktop(
     if any(p is not None for p in parts) and not all(p is not None for p in parts):
         raise ToolError("For a region, give all of x, y, width and height.")
     region = (x, y, width, height) if x is not None else None
-    path = _capture(get_driver(), region, "desktop")  # type: ignore[arg-type]
+    driver = get_driver()
+    # Drivers that can list sensitive windows cheaply (Wayland) refuse to
+    # capture the screen while one is showing.
+    sensitive_windows = getattr(driver, "sensitive_windows", None)
+    if sensitive_windows is not None:
+        found = sensitive_windows()
+        if found:
+            raise ToolError(
+                f"Window {found[0]} is showing a password field. linux-computer-use does not "
+                "capture the screen while a window asks for secrets."
+            )
+    path = _capture(driver, region, "desktop")  # type: ignore[arg-type]
     return _image_result("screenshot_desktop", {"region": region}, path)
 
 
@@ -492,7 +512,8 @@ def screenshot_desktop(
 def screenshot_window(window_id: int) -> list[Any]:
     """Screenshot a single window."""
     driver = get_driver()
-    w = _find_window(driver, window_id)
+    w = _check_window(driver, window_id, acting=True)
+    _require_screen_positions(driver, window_id)
     path = _capture(driver, (w.x, w.y, w.width, w.height), f"window_{window_id}")
     return _image_result("screenshot_window", {"window_id": window_id}, path)
 
@@ -502,6 +523,8 @@ def screenshot_element(window_id: int, element: int) -> list[Any]:
     """Screenshot a single UI element."""
     driver = get_driver()
     e = _find_element(driver, window_id, element, acting=False)
+    _refuse_if_sensitive(window_id, driver.check_sensitive(window_id))
+    _require_screen_positions(driver, window_id)
     path = _capture(driver, (e.x, e.y, e.width, e.height), f"element_{window_id}_{element}")
     return _image_result("screenshot_element", {"window_id": window_id, "element": element}, path)
 

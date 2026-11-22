@@ -1,0 +1,297 @@
+"""Wayland driver with portal input: focus gating, keysyms, screenshots.
+
+The portal itself is faked here; tests/integration/test_portal_dbus.py runs
+the real D-Bus client against a fake portal service.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from linux_computer_use.drivers import keysyms, portal
+from linux_computer_use.drivers.base import NotSupportedError
+from linux_computer_use.drivers.wayland import KEYBOARD_UNVERIFIED_ENV, WaylandDriver
+from linux_computer_use.mcp import server
+from PIL import Image as PILImage
+
+from tests.unit.test_atspi import SCREEN, WINDOW, Node
+from tests.unit.test_wayland import editable_api, make_app, text_api
+
+ACTIVE = ("showing", "visible", "enabled", "sensitive", "active")
+CTRL, SHIFT, RETURN = 0xFFE3, 0xFFE1, 0xFF0D
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.keys: list[tuple[int, bool]] = []
+        self.on_key: Any = None
+
+    def key(self, keysym: int, *, pressed: bool) -> None:
+        self.keys.append((keysym, pressed))
+        if self.on_key:
+            self.on_key(len(self.keys))
+
+
+class FakePortal:
+    def __init__(self, shot: Path) -> None:
+        self.session = FakeSession()
+        self.opened = 0
+        self.shot = shot
+
+    def remote_desktop(self) -> FakeSession:
+        self.opened += 1
+        return self.session
+
+    def pump(self) -> None:
+        pass
+
+    def screenshot(self) -> str:
+        return str(self.shot)
+
+
+@pytest.fixture(autouse=True)
+def gnome(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+    monkeypatch.delenv(KEYBOARD_UNVERIFIED_ENV, raising=False)
+
+
+@pytest.fixture
+def frames() -> dict[str, Node]:
+    entry = Node("text", "Name", states=("showing", "editable", "focusable"))
+    app, frame = make_app("Demo", 42, "/a11y/1", entry)
+    other_app, other = make_app("Other", 43, "/a11y/9")
+    frame.states = ACTIVE
+    return {"apps": [app, other_app], "demo": frame, "other": other}  # type: ignore[dict-item]
+
+
+@pytest.fixture
+def fake_portal(tmp_path: Path) -> FakePortal:
+    shot = tmp_path / "shot.png"
+    PILImage.new("RGB", (64, 48), "white").save(shot)
+    return FakePortal(shot)
+
+
+@pytest.fixture
+def driver(frames: dict[str, Any], fake_portal: FakePortal) -> WaylandDriver:
+    d = WaylandDriver(portal_client=fake_portal)  # type: ignore[arg-type]
+    d.atspi._tried = True
+    d.atspi._atspi = SimpleNamespace(
+        CoordType=SimpleNamespace(SCREEN=SCREEN, WINDOW=WINDOW),
+        Text=text_api(),
+        EditableText=editable_api(),
+        get_desktop=lambda _i: Node("desktop", children=frames["apps"]),
+    )
+    d.list_windows()
+    return d
+
+
+def window_element(driver: WaylandDriver, window_id: int) -> Any:
+    return driver.get_window_state(window_id).elements[0]
+
+
+# --------------------------------------------------------------------------- #
+# Keysyms
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("keys", "expected"),
+    [
+        ("Return", [RETURN]),
+        ("ctrl+c", [CTRL, ord("c")]),
+        ("Ctrl+Shift+T", [CTRL, SHIFT, ord("T")]),
+        ("alt+F4", [0xFFE9, 0xFFC1]),
+        ("ctrl++", [CTRL, ord("+")]),
+        ("+", [ord("+")]),
+        ("Page_Down", [0xFF56]),
+        ("super", [0xFFEB]),
+    ],
+)
+def test_parse_combo(keys: str, expected: list[int]) -> None:
+    assert keysyms.parse_combo(keys) == expected
+
+
+@pytest.mark.parametrize("keys", ["", "ctrl+", "c+ctrl", "Bogus", "ctrl++x"])
+def test_parse_combo_rejects(keys: str) -> None:
+    with pytest.raises(keysyms.KeyNameError):
+        keysyms.parse_combo(keys)
+
+
+def test_text_keysyms() -> None:
+    assert keysyms.text_keysyms("aZ é\n€") == [
+        ord("a"), ord("Z"), 0x20, 0xE9, RETURN, 0x01000000 | 0x20AC,
+    ]
+    with pytest.raises(keysyms.KeyNameError):
+        keysyms.text_keysyms("\x07")
+
+
+# --------------------------------------------------------------------------- #
+# Keyboard through the portal
+# --------------------------------------------------------------------------- #
+
+
+def test_press_key_presses_in_order_and_releases_in_reverse(
+    driver: WaylandDriver, fake_portal: FakePortal
+) -> None:
+    assert driver.press_key("ctrl+c")
+    assert fake_portal.session.keys == [
+        (CTRL, True), (ord("c"), True), (ord("c"), False), (CTRL, False),
+    ]
+
+
+def test_press_key_into_a_named_window_needs_it_focused(
+    driver: WaylandDriver, fake_portal: FakePortal
+) -> None:
+    assert driver.focus_window(1)
+    with pytest.raises(NotSupportedError, match=r"Window 2 doesn't have keyboard focus; window 1"):
+        driver.focus_window(2)
+    with pytest.raises(NotSupportedError, match="bring window 2 to the front"):
+        driver.press_key("Return", window_element(driver, 2))
+    assert fake_portal.opened == 0
+    assert fake_portal.session.keys == []
+
+
+@pytest.mark.parametrize("active", [(), ("demo", "other")])
+def test_no_keys_unless_exactly_one_window_is_focused(
+    driver: WaylandDriver, frames: dict[str, Any], fake_portal: FakePortal, active: tuple
+) -> None:
+    frames["demo"].states = ("showing", "visible")
+    for name in active:
+        frames[name].states = ACTIVE
+    with pytest.raises(NotSupportedError, match=r"No window reports|all report focus"):
+        driver.press_key("Return")
+    assert driver.get_focused_window() is None
+    assert fake_portal.opened == 0
+
+
+def test_no_keys_into_a_password_window(
+    driver: WaylandDriver, frames: dict[str, Any], fake_portal: FakePortal
+) -> None:
+    frames["demo"].kids.append(Node("password text", "Password"))
+    with pytest.raises(NotSupportedError, match="password field"):
+        driver.press_key("Return")
+    assert fake_portal.session.keys == []
+
+
+def test_keyboard_off_on_unverified_desktops(
+    driver: WaylandDriver, fake_portal: FakePortal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+    with pytest.raises(NotSupportedError, match="switched off on KDE"):
+        driver.press_key("Return")
+    assert fake_portal.opened == 0
+    monkeypatch.setenv(KEYBOARD_UNVERIFIED_ENV, "1")
+    assert driver.press_key("Return")
+
+
+def test_keyboard_needs_the_portal_opt_in(driver: WaylandDriver) -> None:
+    driver.portal = None
+    with pytest.raises(NotSupportedError, match=portal.ENABLE_ENV):
+        driver.press_key("Return")
+    with pytest.raises(NotSupportedError, match=portal.ENABLE_ENV):
+        driver.focus_window(1)
+
+
+def test_bad_key_names_are_refused_before_asking(
+    driver: WaylandDriver, fake_portal: FakePortal
+) -> None:
+    with pytest.raises(NotSupportedError, match="Unknown key"):
+        driver.press_key("Hyper_Q")
+    assert fake_portal.opened == 0
+
+
+def test_type_text_without_element_types_into_the_focused_window(
+    driver: WaylandDriver, fake_portal: FakePortal
+) -> None:
+    assert driver.type_text("Hi", window_element(driver, 1))
+    assert fake_portal.session.keys == [
+        (ord("H"), True), (ord("H"), False), (ord("i"), True), (ord("i"), False),
+    ]
+
+
+def test_typing_stops_when_focus_moves(
+    driver: WaylandDriver, frames: dict[str, Any], fake_portal: FakePortal
+) -> None:
+    def steal_focus(sent: int) -> None:
+        if sent == 2:  # first character done
+            frames["demo"].states = ("showing", "visible")
+            frames["other"].states = ACTIVE
+
+    fake_portal.session.on_key = steal_focus
+    with pytest.raises(NotSupportedError, match="doesn't have keyboard focus"):
+        driver.type_text("x" * 40, window_element(driver, 1))
+    # Everything typed before the check is one chunk; nothing after it.
+    assert len(fake_portal.session.keys) == 2 * 16
+
+
+def test_editable_elements_still_use_accessible_insertion(
+    driver: WaylandDriver, fake_portal: FakePortal
+) -> None:
+    state = driver.get_window_state(1)
+    entry = next(e for e in state.elements if "editable" in e.state)
+    with pytest.raises(NotSupportedError, match="not an editable"):
+        driver.type_text("x", entry)  # plain Node has no EditableText iface
+    assert fake_portal.session.keys == []
+
+
+# --------------------------------------------------------------------------- #
+# Screenshots
+# --------------------------------------------------------------------------- #
+
+
+def test_screenshot_desktop_uses_the_portal(driver: WaylandDriver, fake_portal: FakePortal) -> None:
+    assert driver.screenshot_desktop() == str(fake_portal.shot)
+    driver.portal = None
+    with pytest.raises(NotSupportedError, match=portal.ENABLE_ENV):
+        driver.screenshot_desktop()
+
+
+def test_window_screenshots_are_refused(driver: WaylandDriver) -> None:
+    with pytest.raises(NotSupportedError, match="position on screen"):
+        driver.screenshot_window(1)
+
+
+async def test_server_screenshots_on_wayland(driver: WaylandDriver, frames: dict[str, Any]) -> None:
+    from mcp.client import Client
+
+    server.set_driver(driver)  # type: ignore[arg-type]
+    try:
+        async with Client(server.mcp) as client:
+            ok = await client.call_tool("screenshot_desktop", {})
+            assert not ok.is_error, ok.content
+            window = await client.call_tool("screenshot_window", {"window_id": 1})
+            assert window.is_error
+            assert "position on screen" in window.content[0].text
+
+            frames["other"].kids.append(Node("password text", "Password"))
+            refused = await client.call_tool("screenshot_desktop", {})
+            assert refused.is_error
+            assert "password field" in refused.content[0].text
+    finally:
+        server.set_driver(None)
+
+
+# --------------------------------------------------------------------------- #
+# Restore tokens
+# --------------------------------------------------------------------------- #
+
+
+def test_token_store_is_owner_only(tmp_path: Path) -> None:
+    store = portal.TokenStore(tmp_path / "state" / "lcu" / "token")
+    assert store.load() is None
+    store.save("abc")
+    assert store.load() == "abc"
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert store.path.parent.stat().st_mode & 0o777 == 0o700
+    store.clear()
+    store.clear()
+    assert store.load() is None
+
+
+def test_portal_is_opt_in() -> None:
+    assert not portal.enabled({})
+    assert portal.enabled({portal.ENABLE_ENV: "1"})
+    assert not portal.enabled({portal.ENABLE_ENV: "0"})
