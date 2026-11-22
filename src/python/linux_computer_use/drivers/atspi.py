@@ -552,6 +552,21 @@ class ATSPIDriver:
             return ScrollResult(found=True, moved=False)
         return ScrollResult(found=True, moved=after != current)
 
+    def sensitive_frames(self) -> list[str]:
+        """Titles of showing windows, from any app, that contain a password field.
+
+        One Collection query per window; only apps without Collection (GTK 4)
+        get their tree walked.
+        """
+        found = []
+        for _app, frame in self.list_frames():
+            reasons = self.find_sensitive(frame)
+            if reasons is None:
+                reasons = self.read_tree(frame, 0, None, (0, 0)).sensitive_reasons
+            if reasons:
+                found.append(_safe(frame.get_name, "") or "untitled window")
+        return found
+
     def finish(self, tree: AccessibleTree, root: Any) -> AccessibleTree:
         """Catch password fields the walk skipped (off-screen) with one query."""
         if not tree.sensitive and self.find_sensitive(root):

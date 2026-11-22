@@ -494,15 +494,14 @@ def screenshot_desktop(
         raise ToolError("For a region, give all of x, y, width and height.")
     region = (x, y, width, height) if x is not None else None
     driver = get_driver()
-    # Drivers that can list sensitive windows cheaply (Wayland) refuse to
-    # capture the screen while one is showing.
+    # Never capture the screen while any window asks for a secret.
     sensitive_windows = getattr(driver, "sensitive_windows", None)
     if sensitive_windows is not None:
         found = sensitive_windows()
         if found:
             raise ToolError(
-                f"Window {found[0]} is showing a password field. linux-computer-use does not "
-                "capture the screen while a window asks for secrets."
+                f"The window {found[0]!r} is showing a password field. linux-computer-use "
+                "does not capture the screen while a window asks for secrets."
             )
     path = _capture(driver, region, "desktop")  # type: ignore[arg-type]
     return _image_result("screenshot_desktop", {"region": region}, path)

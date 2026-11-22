@@ -18,11 +18,11 @@ the open GNOME focus check except keyboard input itself.
   the secret store is a small follow-up.
 - **2b**: the screenshot is moved out of wherever the portal saved it (GNOME
   saves to `~/Pictures/Screenshots`) into the session's private temp dir, so
-  no copy is left behind. `screenshot_desktop` refuses while any window shows
-  a password field on Wayland. On both drivers, `screenshot_window` and
-  `screenshot_element` now refuse for a window that shows one. Desktop-wide
-  refusal on X11 is left out: X11's check reads each window's whole tree when
-  it isn't cached, which would make every desktop screenshot slow.
+  no copy is left behind. On both drivers, `screenshot_desktop` refuses
+  while any window shows a password field, and `screenshot_window` /
+  `screenshot_element` refuse for a window that shows one. The desktop-wide
+  check is one AT-SPI Collection query per window; only apps without
+  Collection (GTK 4) get their tree walked.
 - **2c**: keyboard input is enabled on GNOME. The user ran
   `tests/manual/focus_check.py` on their GNOME Wayland machine on 2026-11-22
   and reported that it passes: exactly one window claimed focus at each step,

@@ -501,3 +501,11 @@ def test_driver_uses_uinput_with_the_same_focus_gate(
 def test_uinput_is_opt_in() -> None:
     assert uinput.layout_name({}) is None
     assert uinput.layout_name({uinput.ENABLE_ENV: "US"}) == "us"
+
+
+def test_sensitive_frames_walks_apps_without_collection(
+    driver: WaylandDriver, frames: dict[str, Any]
+) -> None:
+    assert driver.sensitive_windows() == []
+    frames["other"].kids.append(Node("password text", "Password"))
+    assert driver.sensitive_windows() == ["Other"]

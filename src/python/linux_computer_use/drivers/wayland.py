@@ -428,9 +428,9 @@ class WaylandDriver(Driver):
             raise NotSupportedError(f"{_NO_CAPTURE} {portal.OPT_IN_HINT}")
         return self.portal.screenshot()
 
-    def sensitive_windows(self) -> list[int]:
-        """Showing windows that contain a password field."""
-        return [wid for wid in self._scan() if self.check_sensitive(wid)]
+    def sensitive_windows(self) -> list[str]:
+        """Titles of showing windows that contain a password field."""
+        return self.atspi.sensitive_frames()
 
 
 def _session_temp_dir() -> Any:
