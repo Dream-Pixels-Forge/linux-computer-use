@@ -12,10 +12,14 @@ the open GNOME focus check except keyboard input itself.
 
 ## What was built, and where it differs from the plan
 
-- **2a** is `drivers/portal.py`. The restore token is kept in a `0600` file
-  under `$XDG_STATE_HOME/linux-computer-use/` (directory `0700`), not yet in
-  libsecret: the file needs no extra typelib and works headless. Moving it to
-  the secret store is a small follow-up.
+- **2a** is `drivers/portal.py`. The restore token is kept in the desktop
+  keyring through libsecret (`gi.repository.Secret`, schema
+  `dev.lcu.RemoteDesktopToken`). The keyring is never unlocked on our behalf,
+  since a password prompt would block the server: when it is locked,
+  unreachable or the typelib is missing, the token goes to a `0600` file
+  under `$XDG_STATE_HOME/linux-computer-use/` (directory `0700`). A file token
+  is moved into the keyring on first load. `LCU_TOKEN_STORE=file` forces the
+  file.
 - **2b**: the screenshot is moved out of wherever the portal saved it (GNOME
   saves to `~/Pictures/Screenshots`) into the session's private temp dir, so
   no copy is left behind. On both drivers, `screenshot_desktop` refuses

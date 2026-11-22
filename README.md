@@ -50,8 +50,10 @@ for permission first. They are off unless you set `LCU_WAYLAND_PORTAL=1`:
 - `screenshot_desktop` uses the Screenshot portal. Window and element
   screenshots are refused, since they need the window's position on screen.
 - `press_key`, and `type_text` without an element, use the RemoteDesktop
-  portal. You approve once; the grant is remembered in
+  portal. You approve once; the grant is remembered in your desktop keyring
+  (GNOME Keyring, KWallet), or, when no unlocked keyring is reachable, in
   `~/.local/state/linux-computer-use/remote-desktop-token` (owner-only).
+  `LCU_TOKEN_STORE=file` always uses the file.
   Wayland doesn't let the server switch windows, so a key is sent only when
   exactly one window reports focus, it's the window asked for, and it shows no
   password field. Otherwise the call is refused and asks you to bring the

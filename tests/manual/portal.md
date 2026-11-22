@@ -20,9 +20,9 @@ Open gedit or GNOME Text Editor with an empty document, and a terminal.
 | 3 | `list_windows`; click into the editor; `press_key` `{"keys": "a", "window_id": <editor>}` | The RemoteDesktop dialog appears. Approve it. An `a` appears in the editor. |
 | 4 | `type_text` `{"text": "Hello, Wayland", "window_id": <editor>}` | The text appears in the editor, no dialog. |
 | 5 | Click into the terminal; `press_key` `{"keys": "Return", "window_id": <editor>}` | Refused: window doesn't have keyboard focus; names the terminal. Nothing typed anywhere. |
-| 6 | Restart the server; click into the editor; repeat step 3 | **No dialog** (restore token reused). |
+| 6 | Restart the server; click into the editor; repeat step 3 | **No dialog** (restore token reused). `secret-tool search purpose remote-desktop-restore-token` shows the token, and `~/.local/state/linux-computer-use/remote-desktop-token` does not exist. |
 | 7 | Stop the remote session from the desktop (GNOME: the screen-sharing indicator in the top bar). Then repeat step 4 | Refused: "session was ended". The next call asks again. |
-| 8 | Lock the screen, wait, unlock; delete the token file; repeat step 3 while locked (use a timer: `sleep 10; ...`) | Refused with a clear reason, never "success". |
+| 8 | Lock the screen, wait, unlock; clear the token (`secret-tool clear purpose remote-desktop-restore-token`, and delete the token file if any); repeat step 3 while locked (use a timer: `sleep 10; ...`) | Refused with a clear reason, never "success". |
 | 9 | `press_key` `{"keys": "ctrl+a"}` then `{"keys": "BackSpace"}` in the editor | Text selected, then deleted (modifiers released afterwards: typing still works normally). |
 
 Record the desktop, version and result in the PR. On a desktop not yet in

@@ -1,6 +1,6 @@
 # 08. Keep the portal restore token in the keyring
 
-**Status:** not started
+**Status:** done (branch `claude/project-thread-sdx9uf`, after PR #6). Real KDE/KWallet not tried: KWallet answers the same Secret Service API since KF 5.97, but check by hand with step 6 of `tests/manual/portal.md`.
 **Depends on:** 01
 
 ## Goal

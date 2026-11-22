@@ -1,6 +1,6 @@
 # 10. Stable window ids across server restarts
 
-**Status:** not started (open question in `docs/design/wayland.md`)
+**Status:** done. Ids are now hashed from `(pid, object path)`; see the decision in `docs/design/wayland.md`. No agent integration caches ids (checked `agents/`), but a client that kept an id across a restart was the real risk: with a counter, id 1 could name a different window afterwards.
 **Depends on:** nothing
 
 ## Goal
