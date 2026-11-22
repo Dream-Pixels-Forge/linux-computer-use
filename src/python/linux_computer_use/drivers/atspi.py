@@ -588,33 +588,50 @@ _SCROLL_SEARCH_ANCESTORS = 12
 
 
 def find_scroll_bar(start: Any, *, vertical: bool) -> Any | None:
-    """The nearest showing scroll bar with the given orientation: inside start
-    first, then around each ancestor (an element inside a scrolled list)."""
-    node, seen = start, 0
-    for _ in range(_SCROLL_SEARCH_ANCESTORS + 1):
-        if node is None:
-            return None
-        hit, seen = _search_scroll_bar(node, vertical, seen)
-        if hit is not None or seen >= _SCROLL_SEARCH_NODES:
+    """The nearest scroll bar with the given orientation: inside start first,
+    then beside each ancestor in turn (an element inside a scrolled list).
+
+    Walking up, only each ancestor's direct children are checked: toolkits
+    put a scroll pane's bars right beside its content, and a long list of
+    rows next to the element must not use up the search. The walk stops at
+    the window, so another window of the app is never touched.
+    """
+    hit, _ = _search_scroll_bar([start], vertical, 0)
+    node = start
+    for _ in range(_SCROLL_SEARCH_ANCESTORS):
+        if hit is not None:
             return hit
         if _safe(node.get_role_name, "") in WINDOW_ROLES:
-            return None  # never reach into the app's other windows
-        node = _safe(node.get_parent, None)
-    return None
+            return None
+        parent = _safe(node.get_parent, None)
+        if parent is None:
+            return None
+        hit = next((c for c in _children(parent) if _is_scroll_bar(c, vertical)), None)
+        node = parent
+    return hit
 
 
-def _search_scroll_bar(root: Any, vertical: bool, seen: int) -> tuple[Any | None, int]:
-    level = [root]
+def _is_scroll_bar(node: Any, vertical: bool) -> bool:
+    # Overlay scroll bars can be hidden while idle; they still move.
+    return (
+        _safe(node.get_role_name, "") == "scroll bar"
+        and _is_vertical(node) == vertical
+        and "defunct" not in _state_nicks(node)
+    )
+
+
+def _search_scroll_bar(level: list[Any], vertical: bool, seen: int) -> tuple[Any | None, int]:
+    """Breadth-first search for a scroll bar; scroll bars come before rows."""
     for _ in range(_SCROLL_SEARCH_DEPTH):
         nxt = []
         for node in level:
             seen += 1
             if seen > _SCROLL_SEARCH_NODES:
                 return None, seen
-            if _safe(node.get_role_name, "") == "scroll bar" and _is_vertical(node) == vertical:
-                states = _state_nicks(node)
-                if "showing" in states or not states:
+            if _safe(node.get_role_name, "") == "scroll bar":
+                if _is_scroll_bar(node, vertical):
                     return node, seen
+                continue
             nxt.extend(_children(node))
         if not nxt:
             break
