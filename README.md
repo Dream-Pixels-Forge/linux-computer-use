@@ -35,6 +35,16 @@ python -m linux_computer_use.mcp
 linux-computer-use start
 ```
 
+The server picks its driver from the session: the Wayland driver when
+`WAYLAND_DISPLAY` is set (or `XDG_SESSION_TYPE=wayland`), the X11 driver
+otherwise. Set `LCU_DRIVER=x11` or `LCU_DRIVER=wayland` to override.
+
+On Wayland, `get_window_state` reports `coordinates: "window"`: element
+positions are relative to the window, because Wayland apps don't know where
+their window is on screen. Actions that need synthesized input (`press_key`,
+`scroll`, clicking by position, typing without an element) and screenshots
+return an error explaining why.
+
 ### Using with an AI Agent
 
 1. Configure the MCP server in your agent's config:
@@ -227,7 +237,7 @@ screenshot = await proxy.screenshot_window(windows[0].window_id)
 | Platform | Read | Write | Notes |
 |----------|------|-------|-------|
 | X11 (most Linux) | ✅ | ✅ | Full support |
-| Wayland (GNOME/KDE) | ⚠️ | ⚠️ | Not yet supported; see [docs/design/wayland.md](docs/design/wayland.md) |
+| Wayland | ✅ | ⚠️ | Through AT-SPI: read trees, click elements, insert text. No key presses, scrolling, coordinate clicks or screenshots yet. Tested on Weston; GNOME and KDE not yet verified. See [docs/design/wayland.md](docs/design/wayland.md) |
 | Xvfb (Virtual) | ✅ | ✅ | Testing environments |
 | AT-SPI (Accessibility) | ✅ | ✅ | Integrated with X11/Wayland |
 
@@ -286,6 +296,9 @@ sudo apt-get install -y xvfb xdotool scrot xterm dbus-x11 at-spi2-core \
   libatk-adaptor gir1.2-atspi-2.0 python3-gi gir1.2-gtk-3.0
 pip install -e ".[dev,atspi]"
 dbus-run-session -- xvfb-run -a pytest tests/integration/ -v
+
+# Wayland integration tests, under headless Weston (needs weston too)
+tests/integration/run_wayland.sh -v
 ```
 
 ### Code Quality

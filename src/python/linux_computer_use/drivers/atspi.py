@@ -102,6 +102,48 @@ class AccessibleTree:
         return "\n".join(lines)
 
 
+class TreeCache:
+    """Live accessibles from each window's most recent tree read.
+
+    Keyed by (window_id, index), so actions can act on exactly the element
+    the client saw, and re-read just that element instead of the tree.
+    """
+
+    def __init__(self) -> None:
+        self._nodes: dict[tuple[int, int], Any] = {}
+        self._parents: dict[tuple[int, int], int] = {}
+        self._roots: dict[int, Any] = {}
+
+    def forget(self, window_id: int) -> None:
+        for key in [k for k in self._nodes if k[0] == window_id]:
+            del self._nodes[key]
+            self._parents.pop(key, None)
+        self._roots.pop(window_id, None)
+
+    def remember(self, window_id: int, root: Any, tree: AccessibleTree) -> None:
+        self.forget(window_id)
+        self._roots[window_id] = root
+        for element, node in zip(tree.elements, tree.accessibles, strict=True):
+            self._nodes[(window_id, element.index)] = node
+            self._parents[(window_id, element.index)] = element.parent_index
+
+    def node(self, window_id: int, index: int) -> Any | None:
+        return self._nodes.get((window_id, index))
+
+    def parent(self, window_id: int, index: int) -> int:
+        return self._parents.get((window_id, index), -1)
+
+    def root(self, window_id: int) -> Any | None:
+        return self._roots.get(window_id)
+
+    def items(self, window_id: int) -> list[tuple[int, Any]]:
+        """(index, accessible) pairs for one window, in tree order."""
+        return sorted(
+            ((index, node) for (wid, index), node in self._nodes.items() if wid == window_id),
+            key=lambda item: item[0],
+        )
+
+
 def _load_atspi() -> Any | None:
     try:
         import gi
@@ -136,8 +178,25 @@ class ATSPIDriver:
         return self._atspi is not None
 
     # ------------------------------------------------------------------ #
-    # Finding a window's accessible
+    # Finding windows
     # ------------------------------------------------------------------ #
+
+    def list_frames(self) -> list[tuple[Any, Any]]:
+        """(application, window) accessibles for every showing top-level window.
+
+        Works on any display server; it is the only window list on Wayland.
+        """
+        if not self.connect():
+            return []
+        frames = []
+        for app in _children(self._atspi.get_desktop(0)):  # type: ignore[union-attr]
+            for window in _children(app):
+                if _safe(window.get_role_name, "") not in WINDOW_ROLES:
+                    continue
+                if "showing" not in _state_nicks(window):
+                    continue
+                frames.append((app, window))
+        return frames
 
     def find_window(
         self, pid: int, title: str, geometry: tuple[int, int, int, int] | None
@@ -432,6 +491,36 @@ class ATSPIDriver:
                 except Exception:
                     return False
         return False
+
+    def insert_text(self, accessible: Any, text: str) -> bool:
+        """Insert text at the caret of an editable field via EditableText.
+
+        The app edits its own field; no keyboard input is synthesized, so it
+        works on Wayland. Returns False for non-editable elements.
+        """
+        if not self.connect() or "editable" not in _state_nicks(accessible):
+            return False
+        atspi = self._atspi
+        try:
+            if accessible.get_editable_text_iface() is None:
+                return False
+            count = atspi.Text.get_character_count(accessible)  # type: ignore[union-attr]
+            caret = atspi.Text.get_caret_offset(accessible)  # type: ignore[union-attr]
+            position = caret if 0 <= caret <= count else count
+            return bool(
+                atspi.EditableText.insert_text(  # type: ignore[union-attr]
+                    accessible, position, text, len(text)
+                )
+            )
+        except Exception:
+            return False
+
+    def finish(self, tree: AccessibleTree, root: Any) -> AccessibleTree:
+        """Catch password fields the walk skipped (off-screen) with one query."""
+        if not tree.sensitive and self.find_sensitive(root):
+            tree.sensitive = True
+            tree.sensitive_reasons.append("password field (outside the visible area)")
+        return tree
 
     def grab_focus(self, accessible: Any) -> bool:
         try:

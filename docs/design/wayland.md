@@ -1,6 +1,6 @@
 # Wayland support: options and recommendation
 
-**Status:** proposal, not yet implemented
+**Status:** phases 0 and 1 implemented; phases 2 and 3 proposed
 **Date:** 2026-11-21
 **Scope:** how `linux-computer-use` can list, read, act on and screenshot windows
 on a Wayland desktop. Today `drivers/wayland.py` is a stub: it lists no windows,
@@ -191,7 +191,7 @@ restricted to allow-listed callers.
 
 ## Plan
 
-**Phase 0: fix GTK 4 coordinates (affects X11 today).** Read extents with
+**Phase 0: fix GTK 4 coordinates (affects X11 today).** *(Implemented.)* Read extents with
 `CoordType.WINDOW` and add the window's origin, which X11 knows. Today the X11
 driver gets every GTK 4 element's position wrong. That affects the pointer
 fallback in `click` (elements without a click action), the focus click in
@@ -200,7 +200,7 @@ pruning is unaffected: the window and its elements are wrong by the same
 offset.) A stray click can land near the top-left of the screen,
 possibly in another app. This is the same window-relative model Wayland needs.
 
-**Phase 1: AT-SPI-only Wayland driver.**
+**Phase 1: AT-SPI-only Wayland driver.** *(Implemented in `drivers/wayland.py`; tested under headless Weston in CI.)*
 - `list_windows` from AT-SPI frames, with per-session ids; `get_window_state`
   from the existing tree reader, positions window-relative.
 - `click(element)` via accessible actions only; refuse when there is none.

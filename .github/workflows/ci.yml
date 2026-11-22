@@ -74,6 +74,34 @@ jobs:
           LCU_GTK_PYTHON: /usr/bin/python3
         run: dbus-run-session -- xvfb-run -a pytest tests/integration -rs
 
+  wayland-integration:
+    name: Wayland + AT-SPI integration (Weston)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Weston, AT-SPI and GTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            weston dbus at-spi2-core libatk-adaptor gir1.2-atspi-2.0 \
+            python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            libgirepository-2.0-dev libcairo2-dev pkg-config
+
+      - name: Install
+        run: pip install -e ".[dev,atspi]"
+
+      - name: Integration tests
+        env:
+          LCU_GTK_PYTHON: /usr/bin/python3
+        run: tests/integration/run_wayland.sh -rs
+
   types:
     name: TypeScript types
     runs-on: ubuntu-latest
@@ -92,7 +120,7 @@ jobs:
       - run: pnpm typecheck
 
   build:
-    needs: [python, x11-integration, types]
+    needs: [python, x11-integration, wayland-integration, types]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

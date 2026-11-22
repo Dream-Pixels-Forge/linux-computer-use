@@ -10,18 +10,20 @@ Run it with ``python -m linux_computer_use.mcp`` or ``linux-computer-use start``
 from __future__ import annotations
 
 import configparser
+import functools
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from PIL import Image as PILImage
 
 from linux_computer_use import __version__
-from linux_computer_use.drivers.base import Element, Window, WindowState
+from linux_computer_use.drivers.base import Element, NotSupportedError, Window, WindowState
 from linux_computer_use.session import get_active_session
 
 logger = logging.getLogger(__name__)
@@ -55,18 +57,49 @@ class DesktopDriver(Protocol):
 _driver: DesktopDriver | None = None
 
 
+def driver_kind(environ: dict[str, str] | None = None) -> str:
+    """Which driver to use: LCU_DRIVER if set ("x11" or "wayland"), otherwise
+    "wayland" in a Wayland session and "x11" elsewhere.
+
+    In a Wayland session DISPLAY usually points at XWayland too, but the X11
+    driver would only see X11 apps there; the Wayland driver sees every
+    accessible app, X11 ones included.
+    """
+    env = os.environ if environ is None else environ
+    kind = env.get("LCU_DRIVER", "").strip().lower()
+    if kind:
+        if kind not in ("x11", "wayland"):
+            raise ToolError(f'LCU_DRIVER must be "x11" or "wayland", not {kind!r}.')
+        return kind
+    if env.get("WAYLAND_DISPLAY") or env.get("XDG_SESSION_TYPE") == "wayland":
+        return "wayland"
+    return "x11"
+
+
 def get_driver() -> DesktopDriver:
-    """Return the active driver, creating the X11 driver on first use."""
+    """Return the active driver, creating it on first use."""
     global _driver
     if _driver is None:
-        from linux_computer_use.drivers.x11 import X11Driver
+        driver: DesktopDriver
+        if driver_kind() == "wayland":
+            from linux_computer_use.drivers.wayland import WaylandDriver
 
-        driver = X11Driver()
-        if not driver.connect():
-            raise ToolError(
+            driver = WaylandDriver()
+            problem = (
+                "Could not reach the AT-SPI accessibility bus, which the Wayland driver "
+                "needs. Install PyGObject and at-spi2-core, and check that "
+                "DBUS_SESSION_BUS_ADDRESS is set."
+            )
+        else:
+            from linux_computer_use.drivers.x11 import X11Driver
+
+            driver = X11Driver()
+            problem = (
                 "Could not connect to an X11 display. Check that DISPLAY is set "
                 "and that xdotool and scrot are installed."
             )
+        if not driver.connect():
+            raise ToolError(problem)
         _driver = driver
     return _driver
 
@@ -236,14 +269,39 @@ mcp = MCPServer(
 )
 
 
-@mcp.tool()
+_Fn = TypeVar("_Fn", bound=Callable[..., Any])
+
+
+def tool(*, structured_output: bool | None = None) -> Callable[[_Fn], _Fn]:
+    """Register an MCP tool whose NotSupportedError becomes a normal tool error.
+
+    MCP reports unexpected exceptions to the client without their message;
+    a driver refusing an action (e.g. a key press on Wayland) is expected, and
+    the client needs to know why.
+    """
+
+    def register(fn: _Fn) -> _Fn:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except NotSupportedError as exc:
+                raise ToolError(str(exc)) from None
+
+        mcp.tool(structured_output=structured_output)(wrapper)
+        return wrapper  # type: ignore[return-value]
+
+    return register
+
+
+@tool()
 def list_apps() -> dict[str, Any]:
     """List installed desktop applications (from XDG .desktop entries)."""
     apps = discover_apps()
     return _audit("list_apps", {}, {"effect": "success", "count": len(apps), "apps": apps})
 
 
-@mcp.tool()
+@tool()
 def list_windows() -> dict[str, Any]:
     """List open, visible windows with their ids, titles and geometry."""
     windows = get_driver().list_windows()
@@ -254,7 +312,7 @@ def list_windows() -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@tool()
 def get_window_state(window_id: int) -> dict[str, Any]:
     """Get a window's element tree (buttons, fields, menus... via AT-SPI).
 
@@ -277,13 +335,14 @@ def get_window_state(window_id: int) -> dict[str, Any]:
             "sensitive_reasons": state.sensitive_reasons,
             "truncated": state.truncated,
             "offscreen": state.offscreen,
+            "coordinates": state.coordinates,
             "tree_markdown": state.tree_markdown,
             "elements": [e.to_dict() for e in state.elements],
         },
     )
 
 
-@mcp.tool()
+@tool()
 def get_app_info(window_id: int) -> dict[str, Any]:
     """Get information about the application that owns a window."""
     driver = get_driver()
@@ -307,7 +366,7 @@ def get_app_info(window_id: int) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@tool()
 def click(
     window_id: int,
     element: int | None = None,
@@ -339,7 +398,7 @@ def click(
     )
 
 
-@mcp.tool()
+@tool()
 def type_text(text: str, window_id: int, element: int | None = None) -> dict[str, Any]:
     """Type text into an element, or into the focused part of the window if no element is given."""
     driver = get_driver()
@@ -361,7 +420,7 @@ def type_text(text: str, window_id: int, element: int | None = None) -> dict[str
     )
 
 
-@mcp.tool()
+@tool()
 def press_key(keys: str, window_id: int | None = None) -> dict[str, Any]:
     """Press a key or combination in xdotool syntax, e.g. 'Return', 'ctrl+c', 'alt+F4'.
 
@@ -384,7 +443,7 @@ def press_key(keys: str, window_id: int | None = None) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@tool()
 def scroll(
     direction: Literal["up", "down", "left", "right"],
     window_id: int,
@@ -413,7 +472,7 @@ def _image_result(tool: str, args: dict[str, Any], path: Path) -> list[Any]:
     return [Image(path=path), json.dumps({"path": str(path), **args})]
 
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def screenshot_desktop(
     x: int | None = None,
     y: int | None = None,
@@ -429,7 +488,7 @@ def screenshot_desktop(
     return _image_result("screenshot_desktop", {"region": region}, path)
 
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def screenshot_window(window_id: int) -> list[Any]:
     """Screenshot a single window."""
     driver = get_driver()
@@ -438,7 +497,7 @@ def screenshot_window(window_id: int) -> list[Any]:
     return _image_result("screenshot_window", {"window_id": window_id}, path)
 
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def screenshot_element(window_id: int, element: int) -> list[Any]:
     """Screenshot a single UI element."""
     driver = get_driver()

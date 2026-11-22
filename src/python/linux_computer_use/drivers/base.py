@@ -102,6 +102,14 @@ class WindowState:
     truncated: bool = False
     #: Elements skipped because they lie outside the window's visible area.
     offscreen: int = 0
+    #: "screen" when element positions are absolute screen pixels, "window"
+    #: when they are relative to the window's top-left corner (Wayland, where
+    #: a window's screen position is unknown).
+    coordinates: str = "screen"
+
+
+class NotSupportedError(Exception):
+    """An action the current driver cannot perform; the message says why."""
 
 
 class Driver(ABC):
