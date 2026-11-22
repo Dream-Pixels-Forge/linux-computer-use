@@ -218,6 +218,7 @@ libei (`snegg`/`oeffis`), restore tokens stored per user in the session's
 secret store, and clear errors when the user declines or the token is
 rejected. Window origins: KWin script and ScreenCast-frame matching first;
 GNOME needs research. Screenshots through ScreenCast.
+The slice-by-slice plan is in [wayland-phase2.md](wayland-phase2.md).
 
 **Phase 3: optional uinput backend** behind an explicit setting, for kiosk and
 CI use.
