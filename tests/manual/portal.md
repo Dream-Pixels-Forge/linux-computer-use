@@ -1,8 +1,10 @@
 # Manual check: portal screenshots and keyboard on a real desktop
 
-CI only has a fake portal and headless Weston, which has no portal backend.
-Run this on a GNOME (and, when possible, KDE) Wayland session before merging
-changes to `drivers/portal.py` or the Wayland keyboard path. About 5 minutes.
+CI runs steps 1, 3, 4, 5 and 6 against real headless GNOME Shell
+(`tests/integration/run_gnome.sh`). It can't cover KDE, the lock screen, ending
+the session from the desktop, or a physical keyboard, so run this on a GNOME
+(and, when possible, KDE) Wayland session before merging changes to those
+paths in `drivers/portal.py` or the Wayland keyboard. About 5 minutes.
 
 Start the server with the portal enabled, connected to an MCP client of your
 choice (or `npx @modelcontextprotocol/inspector`):

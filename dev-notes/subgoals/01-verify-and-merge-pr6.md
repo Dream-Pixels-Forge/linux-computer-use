@@ -19,6 +19,15 @@ work on real hardware, then merge PR #6.
 - The desktop, GNOME version and results are recorded in the PR.
 - PR #6 is merged.
 
+## Update after PR #6 merged
+
+The `gnome-live` CI job now checks against real headless GNOME Shell 46: the
+RemoteDesktop dialog, a keyboard-only session without ScreenCast (accepted),
+token reuse, the focus gate and keys into GTK 4, and desktop screenshots.
+What's left for a person: the lock screen, ending the session from the top
+bar, the password-prompt refusal on a real desktop, the pointer probe, and
+uinput.
+
 ## Watch for
 - Whether GNOME's Screenshot portal shows a dialog for an unsandboxed app (unverified).
 - Whether a RemoteDesktop session with only a keyboard, and no ScreenCast, is accepted on GNOME (unverified).

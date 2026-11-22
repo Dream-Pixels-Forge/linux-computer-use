@@ -1,6 +1,6 @@
 # 09. Test real portals in CI
 
-**Status:** not started
+**Status:** done. Headless GNOME Shell works in a container: `tests/integration/run_gnome.sh`, `tests/integration/test_gnome_live.py`, and the `gnome-live` CI job (Ubuntu 24.04 container). Dialogs are approved over AT-SPI by `tests/integration/apps/approve_portal.py`. See "Real GNOME in CI" in `docs/design/wayland-phase2.md`. A KDE equivalent (headless KWin) is not tried.
 **Depends on:** 01
 
 ## Goal

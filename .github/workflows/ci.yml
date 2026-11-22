@@ -103,6 +103,47 @@ jobs:
           LCU_GTK_PYTHON: /usr/bin/python3
         run: tests/integration/run_wayland.sh -rs
 
+  gnome-live:
+    name: Real GNOME portal (headless GNOME Shell)
+    runs-on: ubuntu-24.04
+    # A plain container, so the test script can run its own system bus and a
+    # mock logind for GNOME Shell (see tests/integration/run_gnome.sh).
+    container:
+      image: ubuntu:24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install GNOME Shell, the portals and GTK
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates python3 python3-venv python3-gi python3-dbusmock \
+            gnome-shell mutter xdg-desktop-portal xdg-desktop-portal-gnome \
+            pipewire wireplumber dbus dbus-user-session libglib2.0-bin \
+            at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-4.0
+
+      - uses: actions/checkout@v5
+
+      - name: Install
+        run: |
+          python3 -m venv --system-site-packages /opt/venv
+          /opt/venv/bin/pip install -e ".[dev,atspi]"
+
+      - name: GNOME portal tests
+        env:
+          PYTHON: /opt/venv/bin/python
+          LCU_GTK_PYTHON: /usr/bin/python3
+          LCU_GNOME_LOGS: /tmp/gnome-logs
+        run: tests/integration/run_gnome.sh -v -rs
+
+      - name: Keep the GNOME logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnome-logs
+          path: /tmp/gnome-logs
+
   types:
     name: TypeScript types
     runs-on: ubuntu-latest
