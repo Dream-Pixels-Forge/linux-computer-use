@@ -77,6 +77,12 @@ class PortalError(NotSupportedError):
     """The portal refused, failed or isn't there; the message says which."""
 
 
+_ENDED = (
+    "The remote control session was ended (by you or the desktop). The next action will "
+    "ask for permission again."
+)
+
+
 # --------------------------------------------------------------------------- #
 # Restore tokens
 # --------------------------------------------------------------------------- #
@@ -144,17 +150,20 @@ class RemoteDesktopSession:
     def key(self, keysym: int, *, pressed: bool) -> None:
         """Press or release one keysym."""
         if self.closed:
-            raise PortalError(
-                "The remote control session was ended (by you or the desktop). The next "
-                "action will ask for permission again."
-            )
+            raise PortalError(_ENDED)
         if not self.devices & KEYBOARD:
             raise PortalError("The permission you granted doesn't include the keyboard.")
-        self.portal.call(
-            REMOTE_DESKTOP_IFACE,
-            "NotifyKeyboardKeysym",
-            self.portal.glib.Variant("(oa{sv}iu)", (self.handle, {}, keysym, int(pressed))),
-        )
+        try:
+            self.portal.call(
+                REMOTE_DESKTOP_IFACE,
+                "NotifyKeyboardKeysym",
+                self.portal.glib.Variant("(oa{sv}iu)", (self.handle, {}, keysym, int(pressed))),
+            )
+        except PortalError as exc:
+            # The session was refused: most likely ended before its Closed
+            # signal reached us. Start afresh next time.
+            self.closed = True
+            raise PortalError(f"{_ENDED} ({exc})") from None
 
     def close(self) -> None:
         if self.closed:
@@ -408,8 +417,11 @@ class Portal:
         def on_closed(*_args: Any) -> None:
             session.closed = True
 
+        # No sender filter: GDBus resolves a well-known sender name to its
+        # owner asynchronously and can drop a signal that arrives first. The
+        # path is ours alone, and a spoofed Closed only makes us stop.
         self.bus().signal_subscribe(
-            BUS_NAME, SESSION_IFACE, "Closed", handle, None,
+            None, SESSION_IFACE, "Closed", handle, None,
             self.gio.DBusSignalFlags.NONE, on_closed,
         )
         self._session = session

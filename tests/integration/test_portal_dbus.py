@@ -294,6 +294,17 @@ def test_session_closed_by_the_user(fake: FakePortal, client: portal.Portal) -> 
     assert client.remote_desktop() is not session  # asks again
 
 
+def test_session_refused_before_closed_arrives(fake: FakePortal, client: portal.Portal) -> None:
+    """If the portal drops the session and Closed hasn't arrived, the refused
+    key still reads as an ended session, and the next call starts a new one."""
+    session = client.remote_desktop()
+    fake.sessions.pop(session.handle)  # gone, without a signal
+    with pytest.raises(portal.PortalError, match="session was ended"):
+        session.key(0x61, pressed=True)
+    assert session.closed
+    assert client.remote_desktop() is not session
+
+
 def test_no_keyboard_offered(fake: FakePortal, client: portal.Portal) -> None:
     fake.devices = portal.POINTER
     with pytest.raises(portal.PortalError, match="offers no keyboard"):
