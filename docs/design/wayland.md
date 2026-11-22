@@ -231,8 +231,9 @@ No pointer: like the portal, it would need the window's screen position.)*
   decides whether coordinate clicks are feasible there.
 - Whether Qt 6, Firefox, Chromium/Electron and LibreOffice expose working
   accessible actions and `EditableText` on Wayland, as GTK does.
-- How to test portal flows in CI, where nobody can approve a dialog:
-  `xdg-desktop-portal` test backends, or a nightly job on a real GNOME VM.
+- ~~How to test portal flows in CI, where nobody can approve a dialog.~~
+  Answered 2026-11-22: headless GNOME Shell in a container, with the portal
+  dialog approved over AT-SPI. See "Real GNOME in CI" in wayland-phase2.md.
 - ~~Whether to keep window ids stable across server restarts.~~ Decided
   2026-11-22: yes. An id is a hash of the app's pid and the frame's AT-SPI
   object path (`window_id_for` in `drivers/wayland.py`), below 2^31. A
