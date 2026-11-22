@@ -213,7 +213,7 @@ possibly in another app. This is the same window-relative model Wayland needs.
 - CI: a job running the existing GTK live tests under `weston --backend=headless`
   (shown to work in this container).
 
-**Phase 2: portal input.** *(Screenshots and keyboard implemented; pointer pending.)* RemoteDesktop + ScreenCast sessions through
+**Phase 2: portal input.** *(Screenshots, keyboard and scrolling implemented; clicks by position pending.)* RemoteDesktop + ScreenCast sessions through
 libei (`snegg`/`oeffis`), restore tokens stored per user in the session's
 secret store, and clear errors when the user declines or the token is
 rejected. Window origins: KWin script and ScreenCast-frame matching first;

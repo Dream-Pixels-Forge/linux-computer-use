@@ -1,6 +1,6 @@
 # Wayland phase 2: implementation plan
 
-**Status:** 2a, 2b and 2c implemented; 2d not started
+**Status:** 2a, 2b, 2c and 2d scrolling implemented; 2d clicks by position researched, not built
 **Date:** 2026-11-22
 **Builds on:** [wayland.md](wayland.md), "Phase 2: portal input"
 
@@ -130,24 +130,44 @@ prompt, which is exactly what `focus_check.py` tests. So:
 Until the result is in, 2c's code can be written and unit-tested against the
 fake portal, but stays behind the gate.
 
-### 2d. Pointer input: scroll and coordinate clicks (needs research)
+### 2d. Scrolling and clicks by position
 
-Needs the window's screen origin, which is still the design doc's hardest open
-question. Proposed order:
+**Scrolling: implemented without a pointer.** `scroll` finds the nearest
+showing scroll bar (inside the element, then around each ancestor, stopping
+at the window so another window is never touched) and moves its AT-SPI
+`Value`, as if the user dragged it. One step is the bar's minimum increment,
+or 5% of its range when the toolkit reports none. It refuses when there is no
+bar, when the list is already at the end, and when the app ignores the new
+value. This works on every compositor and needs no portal. Covered by unit
+tests and by a live GTK 3 / GTK 4 test under Weston; widgets without scroll
+bars (canvases, some custom lists) still can't be scrolled.
 
-1. **Scroll without a position first.** Try `Component.scroll_to` and
-   `ScrollPane` values over AT-SPI for scroll-to-element, which needs no
-   pointer. Phase 1 saw `scroll_to` return false on GTK 3 under Weston; retest
-   on GNOME before relying on it.
-2. **KWin:** a KWin script reports window geometry; usable on KDE.
-3. **GNOME:** no allowed API without unsafe mode. Option worth prototyping:
-   locate the window in a ScreenCast frame by matching the AT-SPI window size
-   and a thumbnail. Fragile with overlap and scaling, so it ships only if a
-   prototype is reliable.
+**Clicks by position: not built; recommended route below.** The problem is
+mapping AT-SPI's window-relative positions to the coordinates the portal's
+pointer uses.
 
-Pointer events then go through `NotifyPointerMotionAbsolute` on the
-ScreenCast stream and `NotifyPointerAxisDiscrete` for wheel steps. This slice
-is a research spike before it is a PR.
+1. **Recommended: a ScreenCast stream of the window itself.** In a combined
+   RemoteDesktop + ScreenCast session, `NotifyPointerMotionAbsolute` takes
+   coordinates *relative to a stream*. If the stream's source is the target
+   window (`SelectSources` with `types=2`, WINDOW), those coordinates are
+   window-relative, which is exactly what AT-SPI already gives us, so no
+   window origin is needed at all. The user picks the window in the portal
+   dialog, and the restore token can bring it back without asking. To
+   verify on GNOME and KDE before building: that window streams are accepted
+   for pointer events in a RemoteDesktop session, and the offset between the
+   stream's content and AT-SPI's window origin (client-side decorations and
+   shadows), which may need a one-time calibration from the stream size vs.
+   the AT-SPI frame size.
+2. **KDE fallback:** a KWin script can report window geometry, giving a
+   screen origin for a monitor stream. Usable but KWin-specific.
+3. **GNOME fallback:** `org.gnome.Shell.Introspect` is restricted to
+   allow-listed callers outside unsafe mode, and matching a window inside a
+   monitor-stream frame by size and thumbnail is fragile with overlap and
+   scaling. Not recommended.
+
+Either route needs PipeWire only to learn the stream size, not to read
+frames. A prototype on a real GNOME session comes before code, because none
+of this can run in CI's headless Weston.
 
 ## Order and PRs
 
@@ -156,7 +176,9 @@ is a research spike before it is a PR.
 | 1 | 2a portal plumbing + fake portal tests | nothing |
 | 2 | 2b desktop screenshots | PR 1 |
 | 3 | 2c keyboard input | PR 1, GNOME focus check result |
-| 4 | 2d scroll and pointer | PR 1, research spike |
+| 4 | 2d pointer clicks via a window stream | prototype on GNOME |
+
+PRs 1 to 3 and 2d's scrolling landed together in one PR.
 
 Phase 3 (uinput) is unaffected by this plan.
 

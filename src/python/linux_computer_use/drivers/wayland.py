@@ -23,7 +23,8 @@ approves it once:
   input stays off on desktops where that focus reporting hasn't been checked
   (see ``KEYBOARD_VERIFIED_DESKTOPS``).
 
-Scrolling and clicking by position are still refused: they need the window's
+``scroll`` moves the nearest scroll bar's value over AT-SPI, so it needs no
+pointer either. Clicking by position is still refused: it needs the window's
 place on screen, which Wayland doesn't reveal. ``Atspi.generate_keyboard_event``
 is not used: on Wayland it reports success and delivers nothing.
 
@@ -343,7 +344,34 @@ class WaylandDriver(Driver):
         return True
 
     def scroll(self, direction: str, amount: int, element: Element) -> bool:
-        raise NotSupportedError(f"Scrolling {_NEEDS_POSITION}.")
+        """Scroll by moving the nearest scroll bar's value over AT-SPI.
+
+        Wayland gives no pointer to wheel with, but the app will move its own
+        scroll bar on request. Refuses when there is no scroll bar to move.
+        """
+        node = self._tree.node(element.window_id, element.index)
+        if node is None and element.index == 0 and element.window_id in self._frames:
+            node = self._frames[element.window_id][1]
+        if node is None:
+            raise NotSupportedError(
+                f"Element {element.index} is no longer available; call get_window_state again."
+            )
+        result = self.atspi.scroll_by_value(node, direction, amount)
+        axis = "vertical" if direction in ("up", "down") else "horizontal"
+        if not result.found:
+            raise NotSupportedError(
+                f"Element {element.index} ({element.role}) has no {axis} scroll bar around it "
+                "that accessibility can move, and wheel scrolling on Wayland "
+                f"{_NEEDS_POSITION}. Pass the index of the scrolled list or an item in it."
+            )
+        if result.at_end:
+            raise NotSupportedError(f"Already scrolled all the way {direction}.")
+        if not result.moved:
+            raise NotSupportedError(
+                f"The app didn't move its scroll bar when asked (Wayland scrolling uses "
+                f"accessibility, and this {axis} scroll bar ignored it)."
+            )
+        return True
 
     def screenshot_window(self, window_id: int) -> str:
         raise NotSupportedError(

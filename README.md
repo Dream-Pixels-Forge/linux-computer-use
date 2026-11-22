@@ -63,7 +63,9 @@ for permission first. They are off unless you set `LCU_WAYLAND_PORTAL=1`:
 - Chrome and Electron apps report focus only when started with accessibility
   on (`--force-renderer-accessibility`); otherwise keys to them are refused.
 
-`scroll` and clicking by position are still refused on Wayland. Tested against
+`scroll` works on Wayland without the portal: it moves the nearest scroll bar
+through accessibility, as if you dragged it. Clicking by position is still
+refused. Tested against
 a fake portal in CI and on headless Weston; GNOME and KDE portals are checked
 by hand with [tests/manual/portal.md](tests/manual/portal.md).
 

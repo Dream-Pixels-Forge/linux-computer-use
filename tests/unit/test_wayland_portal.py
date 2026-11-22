@@ -295,3 +295,102 @@ def test_portal_is_opt_in() -> None:
     assert not portal.enabled({})
     assert portal.enabled({portal.ENABLE_ENV: "1"})
     assert not portal.enabled({portal.ENABLE_ENV: "0"})
+
+
+# --------------------------------------------------------------------------- #
+# Scrolling through scroll bar values (no pointer)
+# --------------------------------------------------------------------------- #
+
+
+class FakeBar(Node):
+    def __init__(self, orientation: str, value: float = 0, high: float = 100,
+                 increment: float = 0, *, obeys: bool = True) -> None:
+        super().__init__("scroll bar", states=("showing", "visible", orientation))
+        self.value, self.high, self.increment, self.obeys = value, high, increment, obeys
+
+    def get_value_iface(self) -> FakeBar:
+        return self
+
+    def get_current_value(self) -> float:
+        return self.value
+
+    def get_minimum_value(self) -> float:
+        return 0
+
+    def get_maximum_value(self) -> float:
+        return self.high
+
+    def get_minimum_increment(self) -> float:
+        return self.increment
+
+    def set_current_value(self, v: float) -> bool:
+        if self.obeys:
+            self.value = v
+        return self.obeys
+
+
+def with_parents(node: Node, parent: Node | None = None) -> Node:
+    node.get_parent = lambda: parent  # type: ignore[attr-defined]
+    for kid in node.kids:
+        with_parents(kid, node)
+    return node
+
+
+@pytest.fixture
+def scrolled(driver: WaylandDriver, frames: dict[str, Any]) -> dict[str, Any]:
+    rows = [Node("push button", f"Row {i}") for i in range(3)]
+    listing = Node("panel", "", children=rows)
+    vbar, hbar = FakeBar("vertical", increment=10), FakeBar("horizontal")
+    pane = Node("scroll pane", "", children=[listing, vbar, hbar])
+    frames["demo"].kids.append(pane)
+    with_parents(frames["apps"][0])
+    state = driver.get_window_state(1)
+    return {"state": state, "vbar": vbar, "hbar": hbar, "pane": pane}
+
+
+def find(state: Any, role: str, name: str = "") -> Any:
+    return next(e for e in state.elements if e.role == role and (not name or e.name == name))
+
+
+def test_scroll_moves_the_nearest_scroll_bar(driver: WaylandDriver, scrolled: dict[str, Any]) -> None:
+    row = find(scrolled["state"], "push button", "Row 1")
+    assert driver.scroll("down", 3, row)  # found by walking up from the row
+    assert scrolled["vbar"].value == 30  # 3 steps of the bar's increment
+    assert driver.scroll("up", 1, find(scrolled["state"], "scroll pane"))
+    assert scrolled["vbar"].value == 20
+    assert driver.scroll("right", 2, row)
+    assert scrolled["hbar"].value == 10  # no increment: 5% of the range per step
+    assert driver.scroll("down", 3, scrolled["state"].elements[0])  # from the window
+
+
+def test_scroll_stops_at_the_end(driver: WaylandDriver, scrolled: dict[str, Any]) -> None:
+    row = find(scrolled["state"], "push button", "Row 0")
+    assert driver.scroll("down", 100, row)
+    assert scrolled["vbar"].value == 100
+    with pytest.raises(NotSupportedError, match="all the way down"):
+        driver.scroll("down", 1, row)
+
+
+def test_scroll_refuses_when_the_app_ignores_it(
+    driver: WaylandDriver, scrolled: dict[str, Any]
+) -> None:
+    scrolled["vbar"].obeys = False
+    with pytest.raises(NotSupportedError, match="didn't move its scroll bar"):
+        driver.scroll("down", 1, find(scrolled["state"], "scroll pane"))
+
+
+def test_scroll_refuses_without_a_scroll_bar(driver: WaylandDriver, frames: dict[str, Any]) -> None:
+    with_parents(frames["apps"][0])
+    root = driver.get_window_state(1).elements[0]
+    with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
+        driver.scroll("down", 3, root)
+
+
+def test_scroll_never_reaches_another_window(driver: WaylandDriver, frames: dict[str, Any]) -> None:
+    """A bar in the app's other window must not be moved."""
+    other_frame = Node("frame", "Second", children=[FakeBar("vertical")])
+    frames["apps"][0].kids.append(other_frame)
+    with_parents(frames["apps"][0])
+    root = driver.get_window_state(1).elements[0]
+    with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
+        driver.scroll("down", 1, root)
