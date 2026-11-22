@@ -53,6 +53,8 @@ async def test_tool_proxy_uses_real_server_tools(tmp_path: Path):
         fake.sensitive = True
         assert "password field" in (await proxy.type_text("x", window_id=42))["error"]
 
+        assert "password field" in (await proxy.screenshot_window(42))["error"]
+        fake.sensitive = False
         shot_result = await proxy.screenshot_window(42)
         assert shot_result["base64"] and shot_result["path"].endswith(".png")
     finally:

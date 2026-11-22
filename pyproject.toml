@@ -86,6 +86,8 @@ ignore = [
 "tests/integration/apps/*.py" = ["FBT003"]
 # PyGObject's AT-SPI bindings (MatchRule.new, get_matches) take booleans positionally.
 "src/python/linux_computer_use/drivers/atspi.py" = ["FBT003"]
+# Standalone script: gi.require_version must run before the gi.repository import.
+"tests/manual/focus_check.py" = ["E402", "I001"]
 
 [tool.mypy]
 python_version = "3.12"

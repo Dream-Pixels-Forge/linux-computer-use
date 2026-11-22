@@ -136,7 +136,7 @@ def test_input_and_capture_are_refused(driver: WaylandDriver, method: str, args:
 def test_scroll_is_refused(driver: WaylandDriver) -> None:
     driver.list_windows()
     root = driver.get_window_state(1).elements[0]
-    with pytest.raises(NotSupportedError, match="Scrolling"):
+    with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
         driver.scroll("down", 3, root)
 
 

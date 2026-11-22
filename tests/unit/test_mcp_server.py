@@ -353,3 +353,10 @@ def test_missing_display_gives_clear_error(monkeypatch):
     set_driver(None)
     with pytest.raises(server.ToolError, match="X11 display"):
         server.get_driver()
+
+
+async def test_desktop_screenshot_refused_while_a_password_window_shows(driver):
+    driver.sensitive_windows = lambda: ["Log in"]
+    assert "'Log in' is showing a password field" in error_text(await call("screenshot_desktop"))
+    driver.sensitive_windows = list
+    assert not (await call("screenshot_desktop")).is_error

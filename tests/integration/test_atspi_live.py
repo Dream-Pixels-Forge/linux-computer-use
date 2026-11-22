@@ -190,6 +190,11 @@ async def _check_password_window(client: Client, login: int) -> None:
     refused = await client.call_tool("click", {"window_id": login, "element": button["index"]})
     assert refused.is_error
 
+    for tool, args in (("screenshot_desktop", {}), ("screenshot_window", {"window_id": login})):
+        refused = await client.call_tool(tool, args)
+        assert refused.is_error, tool
+        assert "password field" in refused.content[0].text
+
 
 async def test_long_list_shows_only_visible_rows_and_scrolls(long_list: int) -> None:
     async with _server() as client:

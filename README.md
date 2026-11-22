@@ -41,9 +41,41 @@ otherwise. Set `LCU_DRIVER=x11` or `LCU_DRIVER=wayland` to override.
 
 On Wayland, `get_window_state` reports `coordinates: "window"`: element
 positions are relative to the window, because Wayland apps don't know where
-their window is on screen. Actions that need synthesized input (`press_key`,
-`scroll`, clicking by position, typing without an element) and screenshots
-return an error explaining why.
+their window is on screen. Clicking elements and typing into fields work
+through AT-SPI with no setup.
+
+Screenshots and key presses go through your desktop's portal, which asks you
+for permission first. They are off unless you set `LCU_WAYLAND_PORTAL=1`:
+
+- `screenshot_desktop` uses the Screenshot portal. Window and element
+  screenshots are refused, since they need the window's position on screen.
+- `press_key`, and `type_text` without an element, use the RemoteDesktop
+  portal. You approve once; the grant is remembered in
+  `~/.local/state/linux-computer-use/remote-desktop-token` (owner-only).
+  Wayland doesn't let the server switch windows, so a key is sent only when
+  exactly one window reports focus, it's the window asked for, and it shows no
+  password field. Otherwise the call is refused and asks you to bring the
+  window to the front.
+- Keyboard input is enabled on GNOME, where the focus check has passed. On
+  other desktops (KDE, wlroots) it stays off until checked; set
+  `LCU_WAYLAND_KEYBOARD_UNVERIFIED=1` to try it anyway. Run
+  `tests/manual/focus_check.py` to check a desktop.
+- Chrome and Electron apps report focus only when started with accessibility
+  on (`--force-renderer-accessibility`); otherwise keys to them are refused.
+
+For kiosks, CI images and desktops with no portal (most wlroots compositors),
+`LCU_WAYLAND_UINPUT=us` sends keys through a virtual keyboard on
+`/dev/uinput` instead. The value names the keyboard layout (only `us` for
+now), since uinput sends physical key codes. It needs access to `/dev/uinput`
+(root, or a udev rule for a group), which lets anything with that access type
+anywhere, so enable it only on machines you control. The same focus and
+password checks apply.
+
+`scroll` works on Wayland without the portal: it moves the nearest scroll bar
+through accessibility, as if you dragged it. Clicking by position is still
+refused. Tested against
+a fake portal in CI and on headless Weston; GNOME and KDE portals are checked
+by hand with [tests/manual/portal.md](tests/manual/portal.md).
 
 ### Using with an AI Agent
 

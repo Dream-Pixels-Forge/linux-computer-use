@@ -515,6 +515,58 @@ class ATSPIDriver:
         except Exception:
             return False
 
+    def scroll_by_value(self, accessible: Any, direction: str, amount: int) -> ScrollResult:
+        """Scroll the nearest scroll bar around accessible by setting its value.
+
+        The app moves its own scroll bar, as if the user dragged it, so no
+        pointer input is needed (this is how scrolling works on Wayland). The
+        bar is searched for inside accessible first, then around each of its
+        ancestors. One step is the bar's minimum increment, or 5% of its range
+        when the toolkit reports none.
+        """
+        vertical = direction in ("up", "down")
+        sign = 1 if direction in ("down", "right") else -1
+        bar = find_scroll_bar(accessible, vertical=vertical)
+        if bar is None:
+            return ScrollResult(found=False)
+        try:
+            value = bar.get_value_iface()
+            if value is None:
+                return ScrollResult(found=False)
+            current = float(value.get_current_value())
+            low, high = float(value.get_minimum_value()), float(value.get_maximum_value())
+            step = float(value.get_minimum_increment() or 0)
+        except Exception:
+            return ScrollResult(found=False)
+        if high <= low:
+            return ScrollResult(found=True, moved=False, at_end=True)
+        if step <= 0 or step > (high - low) / 4:
+            step = (high - low) / 20
+        target = min(high, max(low, current + sign * step * max(1, amount)))
+        if target == current:
+            return ScrollResult(found=True, moved=False, at_end=True)
+        try:
+            value.set_current_value(target)
+            after = float(value.get_current_value())
+        except Exception:
+            return ScrollResult(found=True, moved=False)
+        return ScrollResult(found=True, moved=after != current)
+
+    def sensitive_frames(self) -> list[str]:
+        """Titles of showing windows, from any app, that contain a password field.
+
+        One Collection query per window; only apps without Collection (GTK 4)
+        get their tree walked.
+        """
+        found = []
+        for _app, frame in self.list_frames():
+            reasons = self.find_sensitive(frame)
+            if reasons is None:
+                reasons = self.read_tree(frame, 0, None, (0, 0)).sensitive_reasons
+            if reasons:
+                found.append(_safe(frame.get_name, "") or "untitled window")
+        return found
+
     def finish(self, tree: AccessibleTree, root: Any) -> AccessibleTree:
         """Catch password fields the walk skipped (off-screen) with one query."""
         if not tree.sensitive and self.find_sensitive(root):
@@ -533,6 +585,86 @@ class ATSPIDriver:
 # ---------------------------------------------------------------------- #
 # Helpers (pure functions are unit-tested with fake accessibles)
 # ---------------------------------------------------------------------- #
+
+
+@dataclass
+class ScrollResult:
+    """What scroll_by_value found and did."""
+
+    found: bool
+    moved: bool = False
+    at_end: bool = False
+
+
+#: Bounds for the scroll bar search, so huge trees can't stall a scroll.
+_SCROLL_SEARCH_NODES = 400
+_SCROLL_SEARCH_DEPTH = 6
+_SCROLL_SEARCH_ANCESTORS = 12
+
+
+def find_scroll_bar(start: Any, *, vertical: bool) -> Any | None:
+    """The nearest scroll bar with the given orientation: inside start first,
+    then beside each ancestor in turn (an element inside a scrolled list).
+
+    Walking up, only each ancestor's direct children are checked: toolkits
+    put a scroll pane's bars right beside its content, and a long list of
+    rows next to the element must not use up the search. The walk stops at
+    the window, so another window of the app is never touched.
+    """
+    hit, _ = _search_scroll_bar([start], vertical, 0)
+    node = start
+    for _ in range(_SCROLL_SEARCH_ANCESTORS):
+        if hit is not None:
+            return hit
+        if _safe(node.get_role_name, "") in WINDOW_ROLES:
+            return None
+        parent = _safe(node.get_parent, None)
+        if parent is None:
+            return None
+        hit = next((c for c in _children(parent) if _is_scroll_bar(c, vertical)), None)
+        node = parent
+    return hit
+
+
+def _is_scroll_bar(node: Any, vertical: bool) -> bool:
+    # Overlay scroll bars can be hidden while idle; they still move.
+    return (
+        _safe(node.get_role_name, "") == "scroll bar"
+        and _is_vertical(node) == vertical
+        and "defunct" not in _state_nicks(node)
+    )
+
+
+def _search_scroll_bar(level: list[Any], vertical: bool, seen: int) -> tuple[Any | None, int]:
+    """Breadth-first search for a scroll bar; scroll bars come before rows."""
+    for _ in range(_SCROLL_SEARCH_DEPTH):
+        nxt = []
+        for node in level:
+            seen += 1
+            if seen > _SCROLL_SEARCH_NODES:
+                return None, seen
+            if _safe(node.get_role_name, "") == "scroll bar":
+                if _is_scroll_bar(node, vertical):
+                    return node, seen
+                continue
+            nxt.extend(_children(node))
+        if not nxt:
+            break
+        level = nxt
+    return None, seen
+
+
+def _is_vertical(bar: Any) -> bool:
+    states = _state_nicks(bar)
+    if "vertical" in states:
+        return True
+    if "horizontal" in states:
+        return False
+    try:  # no orientation state: a tall bar is vertical
+        rect = bar.get_component_iface().get_extents(1)  # CoordType.WINDOW
+        return bool(rect.height > rect.width)
+    except Exception:
+        return True
 
 
 def match_window(

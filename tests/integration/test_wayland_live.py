@@ -169,6 +169,39 @@ async def test_unsupported_actions_explain_why(demo: str) -> None:
             assert "Wayland" in message or "portal" in message, (tool, message)
 
 
+@pytest.fixture(params=sorted(TOOLKITS))
+def long_list(request: pytest.FixtureRequest) -> Iterator[str]:
+    app, version = TOOLKITS[request.param]
+    if not _gtk(version):
+        pytest.skip(f"needs GTK {version}")
+    title = f"LCU Wayland list {request.param}"
+    proc = _launch(app, title, "--rows", "200")
+    yield title
+    proc.kill()
+    proc.wait()
+
+
+async def test_scroll_moves_the_list_without_a_pointer(long_list: str) -> None:
+    async with _server() as client:
+        window_id = await _window(client, long_list)
+        state = await _state(client, window_id)
+        rows = [e for e in state["elements"] if e["name"].startswith("Row ")]
+        assert rows, "no rows visible"
+        first = {e["name"] for e in rows}
+        await _call(client, "scroll", {
+            "window_id": window_id, "element": rows[0]["index"], "direction": "down", "amount": 5,
+        })
+        new: list[dict[str, Any]] = []
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            later = await _state(client, window_id)
+            new = [e for e in later["elements"]
+                   if e["name"].startswith("Row ") and e["name"] not in first]
+            if new:
+                break
+        assert new, "scrolling revealed no new rows"
+
+
 async def test_password_window_is_read_only(login: str) -> None:
     async with _server() as client:
         window_id = await _window(client, login)

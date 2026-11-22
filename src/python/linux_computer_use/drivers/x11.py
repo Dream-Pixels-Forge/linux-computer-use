@@ -297,6 +297,10 @@ class X11Driver(Driver):
             return self.get_window_state(window_id).sensitive_reasons
         return reasons
 
+    def sensitive_windows(self) -> list[str]:
+        """Titles of showing windows that contain a password field (AT-SPI)."""
+        return self.atspi.sensitive_frames()
+
     def click(self, element: Element) -> bool:
         """Click an element.
 
