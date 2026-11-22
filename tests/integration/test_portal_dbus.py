@@ -199,17 +199,20 @@ class FakePortal:
 
 @pytest.fixture
 def bus() -> Any:
-    # TestDBus points DBUS_SESSION_BUS_ADDRESS at the private bus and unsets
-    # it when done; put the real one back for the AT-SPI tests that follow.
-    saved = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    # TestDBus changes the process environment behind Python's back: it
+    # unsets DISPLAY and points DBUS_SESSION_BUS_ADDRESS at the private bus
+    # (then unsets it). Re-assign every variable afterwards so the C
+    # environment, which subprocesses inherit, matches os.environ again for
+    # the X11 and AT-SPI tests that follow.
+    saved = dict(os.environ)
     test_bus = Gio.TestDBus.new(Gio.TestDBusFlags.NONE)
     test_bus.up()
     try:
         yield test_bus.get_bus_address()
     finally:
         test_bus.down()
-        if saved is not None:
-            os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved
+        for key, value in saved.items():
+            os.environ[key] = value
 
 
 @pytest.fixture
