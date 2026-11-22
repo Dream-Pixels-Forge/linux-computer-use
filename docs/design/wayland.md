@@ -1,6 +1,6 @@
 # Wayland support: options and recommendation
 
-**Status:** phases 0 and 1 implemented; phase 2 partly implemented (screenshots and keyboard, see [wayland-phase2.md](wayland-phase2.md)); phase 3 proposed
+**Status:** phases 0 and 1 implemented; phase 2 partly implemented (screenshots and keyboard, see [wayland-phase2.md](wayland-phase2.md)); phase 3 implemented for the keyboard (uinput, opt-in)
 **Date:** 2026-11-21
 **Scope:** how `linux-computer-use` can list, read, act on and screenshot windows
 on a Wayland desktop. Today `drivers/wayland.py` is a stub: it lists no windows,
@@ -221,7 +221,8 @@ GNOME needs research. Screenshots through ScreenCast.
 The slice-by-slice plan is in [wayland-phase2.md](wayland-phase2.md).
 
 **Phase 3: optional uinput backend** behind an explicit setting, for kiosk and
-CI use.
+CI use. *(Keyboard implemented in `drivers/uinput.py`: `LCU_WAYLAND_UINPUT=us`.
+No pointer: like the portal, it would need the window's screen position.)*
 
 ## Open questions
 

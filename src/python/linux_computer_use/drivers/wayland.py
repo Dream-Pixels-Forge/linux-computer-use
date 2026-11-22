@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Any
+from typing import Any, Protocol
 
-from linux_computer_use.drivers import keysyms, portal
+from linux_computer_use.drivers import keysyms, portal, uinput
 from linux_computer_use.drivers.atspi import ATSPIDriver, TreeCache, _safe, _state_nicks
 from linux_computer_use.drivers.base import (
     Driver,
@@ -74,14 +74,29 @@ KEYBOARD_UNVERIFIED_ENV = "LCU_WAYLAND_KEYBOARD_UNVERIFIED"
 TYPE_CHUNK = 16
 
 
+class KeySink(Protocol):
+    """Where keysyms go: the portal's RemoteDesktop session or a uinput keyboard."""
+
+    def key(self, keysym: int, *, pressed: bool) -> None: ...
+
+
 class WaylandDriver(Driver):
     """Driver for Wayland sessions, built on AT-SPI."""
 
     #: Element and window positions are window-relative, never screen pixels.
     positions_on_screen = False
 
-    def __init__(self, portal_client: portal.Portal | None = None) -> None:
+    def __init__(
+        self,
+        portal_client: portal.Portal | None = None,
+        uinput_factory: Any = None,
+    ) -> None:
         self.atspi = ATSPIDriver()
+        #: Keyboard layout uinput was enabled for (phase 3), or None when off.
+        #: When set, uinput is used for keys instead of the portal.
+        self.uinput_layout = uinput.layout_name()
+        self._uinput_factory = uinput_factory or uinput.UInputKeyboard
+        self._uinput: Any = None
         if portal_client is None and portal.enabled():
             portal_client = portal.Portal(temp_dir=_session_temp_dir)
         #: Desktop portal client, or None when portal use is not enabled.
@@ -234,9 +249,12 @@ class WaylandDriver(Driver):
             )
         return focused
 
-    def _keyboard_allowed(self) -> portal.Portal:
-        """The portal, if keyboard input is enabled and allowed on this desktop."""
-        if self.portal is None:
+    def _has_keyboard(self) -> bool:
+        return self.portal is not None or self.uinput_layout is not None
+
+    def _keyboard_allowed(self) -> None:
+        """Refuse unless keyboard input is enabled and allowed on this desktop."""
+        if not self._has_keyboard():
             raise NotSupportedError(
                 f"Sending keys {_NEEDS_INPUT}. Text can still be entered into a field: pass "
                 f"type_text the index of an editable element. {portal.OPT_IN_HINT}"
@@ -253,15 +271,38 @@ class WaylandDriver(Driver):
                 "this desktop reports the focused window accurately, and a key sent to the "
                 f"wrong window could do harm. Set {KEYBOARD_UNVERIFIED_ENV}=1 to try it anyway."
             )
-        return self.portal
 
-    def _keyboard(self) -> portal.RemoteDesktopSession:
-        """The portal keyboard session (may show the permission dialog)."""
-        client = self._keyboard_allowed()
-        client.pump()  # notice a session the user closed
-        return client.remote_desktop()
+    def _keyboard(self) -> KeySink:
+        """The keyboard: uinput when enabled, else the portal session (which may
+        show the permission dialog)."""
+        self._keyboard_allowed()
+        if self.uinput_layout is not None:
+            if self._uinput is None or self._uinput.closed:
+                self._uinput = self._uinput_factory(self.uinput_layout)
+            sink: KeySink = self._uinput
+            return sink
+        assert self.portal is not None
+        self.portal.pump()  # notice a session the user closed
+        return self.portal.remote_desktop()
 
-    def _send(self, session: portal.RemoteDesktopSession, combo: list[int]) -> None:
+    def _check_typable(self, syms: list[int]) -> None:
+        """With uinput, refuse up front anything the layout can't type, rather
+        than stopping halfway through a string."""
+        if self.uinput_layout is None:
+            return
+        layout = uinput.LAYOUTS.get(self.uinput_layout)
+        if layout is None:
+            self._keyboard()  # raises the "unsupported layout" error
+            return
+        missing = sorted({chr(s) if s < 0x110000 else "?" for s in syms if s not in layout})
+        if missing:
+            raise NotSupportedError(
+                f"uinput can't type {', '.join(map(repr, missing))} on a "
+                f"{self.uinput_layout.upper()} layout; it only sends physical key codes. "
+                "Use type_text with an editable element's index instead."
+            )
+
+    def _send(self, session: KeySink, combo: list[int]) -> None:
         """Press the keys in order and release them in reverse, even on error."""
         pressed: list[int] = []
         try:
@@ -306,6 +347,7 @@ class WaylandDriver(Driver):
         except keysyms.KeyNameError as exc:
             raise NotSupportedError(str(exc)) from None
         self._keyboard_allowed()
+        self._check_typable(syms)
         self._require_focus(window_id)  # before any permission dialog
         session = self._keyboard()
         for start in range(0, len(syms), TYPE_CHUNK):
@@ -317,7 +359,7 @@ class WaylandDriver(Driver):
 
     def focus_window(self, window_id: int) -> bool:
         """Wayland can't switch windows for us; succeed only if it already has focus."""
-        if self.portal is None:
+        if not self._has_keyboard():
             raise NotSupportedError(
                 f"Focusing a window (needed to press keys or type into whatever has focus) "
                 f"{_NEEDS_INPUT}. Text can still be entered: pass type_text the index of an "
@@ -337,6 +379,7 @@ class WaylandDriver(Driver):
             raise NotSupportedError(str(exc)) from None
         target = element.window_id if element is not None else None
         self._keyboard_allowed()
+        self._check_typable(combo)
         self._require_focus(target)  # before any permission dialog
         session = self._keyboard()
         self._require_focus(target)  # the dialog may have moved focus

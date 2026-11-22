@@ -63,6 +63,14 @@ for permission first. They are off unless you set `LCU_WAYLAND_PORTAL=1`:
 - Chrome and Electron apps report focus only when started with accessibility
   on (`--force-renderer-accessibility`); otherwise keys to them are refused.
 
+For kiosks, CI images and desktops with no portal (most wlroots compositors),
+`LCU_WAYLAND_UINPUT=us` sends keys through a virtual keyboard on
+`/dev/uinput` instead. The value names the keyboard layout (only `us` for
+now), since uinput sends physical key codes. It needs access to `/dev/uinput`
+(root, or a udev rule for a group), which lets anything with that access type
+anywhere, so enable it only on machines you control. The same focus and
+password checks apply.
+
 `scroll` works on Wayland without the portal: it moves the nearest scroll bar
 through accessibility, as if you dragged it. Clicking by position is still
 refused. Tested against

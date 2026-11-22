@@ -306,3 +306,17 @@ def test_no_portal_running(bus: str, tmp_path: Path) -> None:
         lonely.screenshot()
     with pytest.raises(portal.PortalError, match="No desktop portal is running"):
         lonely.remote_desktop()
+
+
+def test_gio_loads_in_a_fresh_process() -> None:
+    """gi.repository loads typelibs lazily; Portal must import Gio itself
+    (this file's own import would otherwise hide a failure)."""
+    import subprocess
+    import sys
+
+    code = (
+        "from linux_computer_use.drivers import portal; "
+        "p = portal.Portal(); print(p.gio is not None and p.glib is not None)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "True", out.stderr

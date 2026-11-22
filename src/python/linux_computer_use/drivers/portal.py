@@ -121,10 +121,14 @@ class TokenStore:
 
 
 def _load_gio() -> tuple[Any, Any] | None:
+    # Import the submodules by name: gi.repository loads typelibs lazily, so
+    # its attributes don't exist until each one is imported.
     try:
-        repo = importlib.import_module("gi.repository")
-        return repo.Gio, repo.GLib
-    except (ImportError, ValueError, AttributeError):
+        return (
+            importlib.import_module("gi.repository.Gio"),
+            importlib.import_module("gi.repository.GLib"),
+        )
+    except (ImportError, ValueError):
         return None
 
 

@@ -29,3 +29,26 @@ Record the desktop, version and result in the PR. On a desktop not yet in
 `KEYBOARD_VERIFIED_DESKTOPS`, run `python3 tests/manual/focus_check.py`
 first (instructions in the script) and set
 `LCU_WAYLAND_KEYBOARD_UNVERIFIED=1` for steps 3 to 9.
+
+## Clicks by position: pointer probe
+
+```bash
+python3 tests/manual/pointer_probe.py
+```
+
+Pick the "LCU Pointer Probe" window in the portal dialog. Paste the whole
+output into the PR: the `RESULT:` line says whether window-stream clicks
+work and with which offset.
+
+## uinput keyboard (kiosk / no portal)
+
+On a machine where you can grant `/dev/uinput` access (and may type into the
+lock screen by accident, so not your daily desktop):
+
+```bash
+sudo modprobe uinput
+LCU_WAYLAND_UINPUT=us LCU_WAYLAND_KEYBOARD_UNVERIFIED=1 python -m linux_computer_use.mcp
+```
+
+Repeat steps 3 to 5 and 9 above (no dialog appears). `type_text` with `é`
+must be refused before anything is typed.

@@ -169,6 +169,13 @@ Either route needs PipeWire only to learn the stream size, not to read
 frames. A prototype on a real GNOME session comes before code, because none
 of this can run in CI's headless Weston.
 
+**The prototype is `tests/manual/pointer_probe.py`.** It opens the GTK demo,
+asks the portal for pointer access and a stream of that one window, moves
+the pointer to the "Count" button's centre as AT-SPI reports it, clicks, and
+reads the demo's label to see whether the click landed. On a miss it tries
+the offsets the stream and frame sizes suggest. Its output decides whether
+`click_coordinate` gets built on window streams, and with which offset.
+
 ## Order and PRs
 
 | PR | Slice | Waits on |
@@ -180,7 +187,8 @@ of this can run in CI's headless Weston.
 
 PRs 1 to 3 and 2d's scrolling landed together in one PR.
 
-Phase 3 (uinput) is unaffected by this plan.
+Phase 3 (uinput keyboard, `drivers/uinput.py`) landed in the same PR: opt-in with
+`LCU_WAYLAND_UINPUT=us`, the same focus and password gate, US layout only.
 
 ## What needs a real GNOME or KDE session
 

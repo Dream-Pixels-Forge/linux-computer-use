@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from linux_computer_use.drivers import keysyms, portal
+from linux_computer_use.drivers import keysyms, portal, uinput
 from linux_computer_use.drivers.base import NotSupportedError
 from linux_computer_use.drivers.wayland import KEYBOARD_UNVERIFIED_ENV, WaylandDriver
 from linux_computer_use.mcp import server
@@ -394,3 +394,110 @@ def test_scroll_never_reaches_another_window(driver: WaylandDriver, frames: dict
     root = driver.get_window_state(1).elements[0]
     with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
         driver.scroll("down", 1, root)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: uinput keyboard
+# --------------------------------------------------------------------------- #
+
+
+class FakeUInputDevice:
+    """Records ioctls and written events in place of /dev/uinput."""
+
+    def __init__(self) -> None:
+        self.ioctls: list[tuple[int, Any]] = []
+        self.data = b""
+
+    def ioctl(self, fd: int, request: int, arg: Any = 0) -> int:
+        self.ioctls.append((request, arg))
+        return 0
+
+    def write(self, fd: int, data: bytes) -> int:
+        self.data += data
+        return len(data)
+
+
+@pytest.fixture
+def device(monkeypatch: pytest.MonkeyPatch) -> FakeUInputDevice:
+    monkeypatch.setattr(uinput.time, "sleep", lambda _s: None)
+    return FakeUInputDevice()
+
+
+def make_keyboard(device: FakeUInputDevice, layout: str = "us") -> uinput.UInputKeyboard:
+    return uinput.UInputKeyboard(
+        layout, opener=lambda _p, _f: 99, ioctl=device.ioctl, writer=device.write
+    )
+
+
+def key_events(device: FakeUInputDevice) -> list[tuple[int, int]]:
+    return [(code, value) for kind, code, value in uinput.decode(device.data) if kind == uinput.EV_KEY]
+
+
+def test_uinput_device_setup(device: FakeUInputDevice) -> None:
+    make_keyboard(device)
+    requests = [r for r, _ in device.ioctls]
+    assert requests[0] == uinput.UI_SET_EVBIT
+    assert uinput.UI_DEV_SETUP in requests
+    assert requests[-1] == uinput.UI_DEV_CREATE
+    assert (uinput.UI_SET_KEYBIT, 30) in device.ioctls  # KEY_A
+    assert uinput.UI_DEV_SETUP == 0x405C5503  # _IOW('U', 3, struct uinput_setup)
+
+
+def test_uinput_types_with_shift_and_syncs(device: FakeUInputDevice) -> None:
+    kb = make_keyboard(device)
+    for sym in keysyms.text_keysyms("aA!"):
+        kb.key(sym, pressed=True)
+        kb.key(sym, pressed=False)
+    assert key_events(device) == [
+        (30, 1), (30, 0),
+        (42, 1), (30, 1), (30, 0), (42, 0),
+        (42, 1), (2, 1), (2, 0), (42, 0),
+    ]
+    kinds = [kind for kind, _, _ in uinput.decode(device.data)]
+    assert kinds[1::2] == [uinput.EV_SYN] * (len(kinds) // 2)  # a report after every key
+
+
+@pytest.mark.parametrize(("keys", "codes"), [
+    ("Return", [28]), ("ctrl+c", [29, 46]), ("alt+F4", [56, 62]), ("F12", [88]), ("F13", [183]),
+])
+def test_uinput_named_keys(device: FakeUInputDevice, keys: str, codes: list[int]) -> None:
+    kb = make_keyboard(device)
+    for sym in keysyms.parse_combo(keys):
+        kb.key(sym, pressed=True)
+    assert [code for code, _ in key_events(device)] == codes
+
+
+def test_uinput_refuses_unknown_layouts_and_missing_device(device: FakeUInputDevice) -> None:
+    with pytest.raises(NotSupportedError, match="only us is supported"):
+        make_keyboard(device, "fr")
+
+    def denied(_p: str, _f: int) -> int:
+        raise PermissionError
+
+    with pytest.raises(NotSupportedError, match="udev rule"):
+        uinput.UInputKeyboard("us", opener=denied, ioctl=device.ioctl, writer=device.write)
+
+
+def test_driver_uses_uinput_with_the_same_focus_gate(
+    driver: WaylandDriver, device: FakeUInputDevice, frames: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver.portal = None
+    driver.uinput_layout = "us"
+    driver._uinput_factory = lambda layout: make_keyboard(device, layout)
+    assert driver.press_key("ctrl+a")
+    assert key_events(device) == [(29, 1), (30, 1), (30, 0), (29, 0)]
+
+    with pytest.raises(NotSupportedError, match="can't type 'é'"):
+        driver.type_text("café", window_element(driver, 1))
+    assert len(key_events(device)) == 4  # nothing typed, not even "caf"
+
+    frames["demo"].kids.append(Node("password text", "Password"))
+    with pytest.raises(NotSupportedError, match="password field"):
+        driver.press_key("Return")
+    assert len(key_events(device)) == 4
+
+
+def test_uinput_is_opt_in() -> None:
+    assert uinput.layout_name({}) is None
+    assert uinput.layout_name({uinput.ENABLE_ENV: "US"}) == "us"
