@@ -166,9 +166,9 @@ the window in a ScreenCast frame. This is the hardest part of Wayland support
 and the main reason to lead with option A.
 
 **Window list.** Use AT-SPI: each application's top-level frames are the
-windows, on any compositor. They have no numeric ids, so the driver hands out
-per-session ids mapped to the frame's accessible, the same way element indexes
-work. `ext-foreign-toplevel-list-v1` gives a standard list on several wlroots-
+windows, on any compositor. They have no numeric ids, so the driver derives
+one from the app's pid and the frame's object path, mapped to the frame's
+accessible the same way element indexes work. `ext-foreign-toplevel-list-v1` gives a standard list on several wlroots-
 based compositors and COSMIC, but not on GNOME or KWin.
 
 **Screenshots.** The Screenshot portal works on GNOME and KDE and asks the user
@@ -201,7 +201,8 @@ offset.) A stray click can land near the top-left of the screen,
 possibly in another app. This is the same window-relative model Wayland needs.
 
 **Phase 1: AT-SPI-only Wayland driver.** *(Implemented in `drivers/wayland.py`; tested under headless Weston in CI.)*
-- `list_windows` from AT-SPI frames, with per-session ids; `get_window_state`
+- `list_windows` from AT-SPI frames, with ids hashed from (pid, object
+  path) so they survive restarts; `get_window_state`
   from the existing tree reader, positions window-relative.
 - `click(element)` via accessible actions only; refuse when there is none.
 - `type_text(element)` via `EditableText` (insert at the caret, or set
@@ -230,10 +231,16 @@ No pointer: like the portal, it would need the window's screen position.)*
   decides whether coordinate clicks are feasible there.
 - Whether Qt 6, Firefox, Chromium/Electron and LibreOffice expose working
   accessible actions and `EditableText` on Wayland, as GTK does.
-- How to test portal flows in CI, where nobody can approve a dialog:
-  `xdg-desktop-portal` test backends, or a nightly job on a real GNOME VM.
-- Whether to keep window ids stable across server restarts (AT-SPI frames have
-  no persistent id).
+- ~~How to test portal flows in CI, where nobody can approve a dialog.~~
+  Answered 2026-11-22: headless GNOME Shell in a container, with the portal
+  dialog approved over AT-SPI. See "Real GNOME in CI" in wayland-phase2.md.
+- ~~Whether to keep window ids stable across server restarts.~~ Decided
+  2026-11-22: yes. An id is a hash of the app's pid and the frame's AT-SPI
+  object path (`window_id_for` in `drivers/wayland.py`), below 2^31. A
+  per-session counter gave id 1 to whichever window was listed first, so a
+  client still holding an id from before a restart could act on a different
+  window. Hashed ids point at the same window for as long as the app runs, as
+  X11 ids do; a rare in-session collision moves to the next free id.
 
 ## Sources
 

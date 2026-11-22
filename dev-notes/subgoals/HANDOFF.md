@@ -1,7 +1,7 @@
 # Handoff: Wayland support
 
 **Date:** 2026-11-22
-**Branch / PR:** `claude/project-thread-sdx9uf`, PR #6 (ready for review, CI green on all 6 checks)
+**Branch / PR:** `claude/project-thread-sdx9uf`. PR #6 merged 2026-11-22; subgoals 08, 09 and 10 in the follow-up PR
 **Read first:** `docs/design/wayland.md` (options and phases), `docs/design/wayland-phase2.md` (what was built and why)
 
 ## Where things stand
@@ -45,13 +45,20 @@ pip install -e ".[dev,atspi]"
 ruff check src/python tests && mypy src/python && pytest tests/unit
 dbus-run-session -- xvfb-run -a pytest tests/integration      # X11 live + fake portal
 tests/integration/run_wayland.sh                               # Wayland live under Weston
+tests/integration/run_gnome.sh                                 # real GNOME Shell + portals (root)
 ```
 
 - In the cloud container, PyGObject only works with `python3.12`. Make a venv with
   `--system-site-packages`. GTK 3/4, Weston, at-spi2-core, xdotool, scrot and xterm
   can be installed with apt (run `apt-get update` first). Set `LCU_GTK_PYTHON=/usr/bin/python3.12`.
-- CI has no real portal and no `/dev/uinput`. Real behaviour is checked by hand
-  with `tests/manual/portal.md`.
+- CI runs a real headless GNOME Shell for the portal paths
+  (`tests/integration/run_gnome.sh`, needs root outside a desktop login: it starts a
+  system bus and a mock logind). There is no `/dev/uinput` and no KDE in CI; those, the
+  lock screen and ending the session are checked by hand with `tests/manual/portal.md`.
+- The restore token lives in the keyring (libsecret), falling back to a 0600 file.
+  `LCU_TOKEN_STORE=file` forces the file.
+- Wayland window ids are hashes of (pid, AT-SPI object path), not counters, so they
+  survive server restarts.
 
 ## Gotchas learned the hard way
 

@@ -34,6 +34,7 @@ See docs/design/wayland.md and docs/design/wayland-phase2.md.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 from typing import Any, Protocol
 
@@ -80,6 +81,24 @@ class KeySink(Protocol):
     def key(self, keysym: int, *, pressed: bool) -> None: ...
 
 
+#: Window ids stay below 2**31 so every client can hold them as an int32.
+_MAX_WINDOW_ID = 2**31 - 1
+
+
+def window_id_for(pid: int, path: str) -> int:
+    """A window id derived from the app's pid and the frame's AT-SPI path.
+
+    AT-SPI frames have no persistent id, and Wayland gives no window handle.
+    A per-session counter would hand id 1 to whichever window came first
+    after a restart, so a client still holding an old id could act on the
+    wrong window. Hashing (pid, path) keeps an id pointing at the same window
+    for as long as the app runs, the way X11 window ids do, and a window
+    that is gone leaves its id unused instead of passing it on.
+    """
+    digest = hashlib.blake2b(f"{pid}\0{path}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % _MAX_WINDOW_ID + 1
+
+
 class WaylandDriver(Driver):
     """Driver for Wayland sessions, built on AT-SPI."""
 
@@ -102,10 +121,17 @@ class WaylandDriver(Driver):
         #: Desktop portal client, or None when portal use is not enabled.
         self.portal = portal_client
         self._tree = TreeCache()
-        # Per-session window ids for accessible frames, keyed by (pid, object path).
+        # Window ids for accessible frames, keyed by (pid, object path). See
+        # window_id_for: the same window keeps its id across server restarts.
         self._ids: dict[tuple[int, str], int] = {}
         self._frames: dict[int, tuple[Any, Any]] = {}
-        self._next_id = 1
+
+    def _free_id(self, wanted: int) -> int:
+        # Two windows hashing alike is very unlikely, but must never merge them.
+        taken = set(self._ids.values())
+        while wanted in taken:
+            wanted = wanted % _MAX_WINDOW_ID + 1
+        return wanted
 
     def connect(self) -> bool:
         """True when the AT-SPI bus is reachable."""
@@ -124,8 +150,7 @@ class WaylandDriver(Driver):
             key = (pid, str(_safe(lambda f=frame: f.path, "") or id(frame)))
             window_id = self._ids.get(key)
             if window_id is None:
-                window_id = self._ids[key] = self._next_id
-                self._next_id += 1
+                window_id = self._ids[key] = self._free_id(window_id_for(*key))
             frames[window_id] = (app, frame)
             order.append(window_id)
         for gone in set(self._frames) - set(frames):

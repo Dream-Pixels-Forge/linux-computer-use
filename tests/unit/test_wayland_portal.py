@@ -18,7 +18,7 @@ from linux_computer_use.mcp import server
 from PIL import Image as PILImage
 
 from tests.unit.test_atspi import SCREEN, WINDOW, Node
-from tests.unit.test_wayland import editable_api, make_app, text_api
+from tests.unit.test_wayland import DEMO, OTHER, editable_api, make_app, text_api
 
 ACTIVE = ("showing", "visible", "enabled", "sensitive", "active")
 CTRL, SHIFT, RETURN = 0xFFE3, 0xFFE1, 0xFF0D
@@ -145,11 +145,11 @@ def test_press_key_presses_in_order_and_releases_in_reverse(
 def test_press_key_into_a_named_window_needs_it_focused(
     driver: WaylandDriver, fake_portal: FakePortal
 ) -> None:
-    assert driver.focus_window(1)
-    with pytest.raises(NotSupportedError, match=r"Window 2 doesn't have keyboard focus; window 1"):
-        driver.focus_window(2)
-    with pytest.raises(NotSupportedError, match="bring window 2 to the front"):
-        driver.press_key("Return", window_element(driver, 2))
+    assert driver.focus_window(DEMO)
+    with pytest.raises(NotSupportedError, match=rf"Window {OTHER} doesn.t have keyboard focus; window {DEMO}"):
+        driver.focus_window(OTHER)
+    with pytest.raises(NotSupportedError, match=f"bring window {OTHER} to the front"):
+        driver.press_key("Return", window_element(driver, OTHER))
     assert fake_portal.opened == 0
     assert fake_portal.session.keys == []
 
@@ -192,7 +192,7 @@ def test_keyboard_needs_the_portal_opt_in(driver: WaylandDriver) -> None:
     with pytest.raises(NotSupportedError, match=portal.ENABLE_ENV):
         driver.press_key("Return")
     with pytest.raises(NotSupportedError, match=portal.ENABLE_ENV):
-        driver.focus_window(1)
+        driver.focus_window(DEMO)
 
 
 def test_bad_key_names_are_refused_before_asking(
@@ -206,7 +206,7 @@ def test_bad_key_names_are_refused_before_asking(
 def test_type_text_without_element_types_into_the_focused_window(
     driver: WaylandDriver, fake_portal: FakePortal
 ) -> None:
-    assert driver.type_text("Hi", window_element(driver, 1))
+    assert driver.type_text("Hi", window_element(driver, DEMO))
     assert fake_portal.session.keys == [
         (ord("H"), True), (ord("H"), False), (ord("i"), True), (ord("i"), False),
     ]
@@ -222,7 +222,7 @@ def test_typing_stops_when_focus_moves(
 
     fake_portal.session.on_key = steal_focus
     with pytest.raises(NotSupportedError, match="doesn't have keyboard focus"):
-        driver.type_text("x" * 40, window_element(driver, 1))
+        driver.type_text("x" * 40, window_element(driver, DEMO))
     # Everything typed before the check is one chunk; nothing after it.
     assert len(fake_portal.session.keys) == 2 * 16
 
@@ -230,7 +230,7 @@ def test_typing_stops_when_focus_moves(
 def test_editable_elements_still_use_accessible_insertion(
     driver: WaylandDriver, fake_portal: FakePortal
 ) -> None:
-    state = driver.get_window_state(1)
+    state = driver.get_window_state(DEMO)
     entry = next(e for e in state.elements if "editable" in e.state)
     with pytest.raises(NotSupportedError, match="not an editable"):
         driver.type_text("x", entry)  # plain Node has no EditableText iface
@@ -262,7 +262,7 @@ async def test_server_screenshots_on_wayland(driver: WaylandDriver, frames: dict
         async with Client(server.mcp) as client:
             ok = await client.call_tool("screenshot_desktop", {})
             assert not ok.is_error, ok.content
-            window = await client.call_tool("screenshot_window", {"window_id": 1})
+            window = await client.call_tool("screenshot_window", {"window_id": DEMO})
             assert window.is_error
             assert "position on screen" in window.content[0].text
 
@@ -280,7 +280,7 @@ async def test_server_screenshots_on_wayland(driver: WaylandDriver, frames: dict
 
 
 def test_token_store_is_owner_only(tmp_path: Path) -> None:
-    store = portal.TokenStore(tmp_path / "state" / "lcu" / "token")
+    store = portal.TokenStore(tmp_path / "state" / "lcu" / "token", keyring=None)
     assert store.load() is None
     store.save("abc")
     assert store.load() == "abc"
@@ -344,7 +344,7 @@ def scrolled(driver: WaylandDriver, frames: dict[str, Any]) -> dict[str, Any]:
     pane = Node("scroll pane", "", children=[listing, vbar, hbar])
     frames["demo"].kids.append(pane)
     with_parents(frames["apps"][0])
-    state = driver.get_window_state(1)
+    state = driver.get_window_state(DEMO)
     return {"state": state, "vbar": vbar, "hbar": hbar, "pane": pane}
 
 
@@ -381,7 +381,7 @@ def test_scroll_refuses_when_the_app_ignores_it(
 
 def test_scroll_refuses_without_a_scroll_bar(driver: WaylandDriver, frames: dict[str, Any]) -> None:
     with_parents(frames["apps"][0])
-    root = driver.get_window_state(1).elements[0]
+    root = driver.get_window_state(DEMO).elements[0]
     with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
         driver.scroll("down", 3, root)
 
@@ -391,7 +391,7 @@ def test_scroll_never_reaches_another_window(driver: WaylandDriver, frames: dict
     other_frame = Node("frame", "Second", children=[FakeBar("vertical")])
     frames["apps"][0].kids.append(other_frame)
     with_parents(frames["apps"][0])
-    root = driver.get_window_state(1).elements[0]
+    root = driver.get_window_state(DEMO).elements[0]
     with pytest.raises(NotSupportedError, match="no vertical scroll bar"):
         driver.scroll("down", 1, root)
 
@@ -489,7 +489,7 @@ def test_driver_uses_uinput_with_the_same_focus_gate(
     assert key_events(device) == [(29, 1), (30, 1), (30, 0), (29, 0)]
 
     with pytest.raises(NotSupportedError, match="can't type 'é'"):
-        driver.type_text("café", window_element(driver, 1))
+        driver.type_text("café", window_element(driver, DEMO))
     assert len(key_events(device)) == 4  # nothing typed, not even "caf"
 
     frames["demo"].kids.append(Node("password text", "Password"))

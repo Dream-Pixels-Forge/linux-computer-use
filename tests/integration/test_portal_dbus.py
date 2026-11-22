@@ -227,7 +227,7 @@ def client(bus: str, tmp_path: Path) -> portal.Portal:
     temp = tmp_path / "session"
     temp.mkdir()
     return portal.Portal(
-        tokens=portal.TokenStore(tmp_path / "state" / "token"),
+        tokens=portal.TokenStore(tmp_path / "state" / "token", keyring=None),
         bus_address=bus,
         temp_dir=lambda: temp,
     )
@@ -312,7 +312,7 @@ def test_no_keyboard_offered(fake: FakePortal, client: portal.Portal) -> None:
 
 
 def test_no_portal_running(bus: str, tmp_path: Path) -> None:
-    lonely = portal.Portal(tokens=portal.TokenStore(tmp_path / "t"), bus_address=bus)
+    lonely = portal.Portal(tokens=portal.TokenStore(tmp_path / "t", keyring=None), bus_address=bus)
     with pytest.raises(portal.PortalError, match="No desktop portal is running"):
         lonely.screenshot()
     with pytest.raises(portal.PortalError, match="No desktop portal is running"):

@@ -9,8 +9,8 @@ the AT-SPI support already needs), so it adds no dependency.
   wherever the portal saved it (often ~/Pictures) into our private temp dir.
 - ``Portal.remote_desktop()``: one RemoteDesktop session with a keyboard,
   opened on first use and reused. ``persist_mode=2`` makes the portal return
-  a restore token, stored with ``0600`` permissions, so later server starts
-  skip the dialog.
+  a restore token, kept in the desktop keyring (or a ``0600`` file when
+  there is none), so later server starts skip the dialog.
 
 Every failure (no portal, the user declined, the session was closed, a
 timeout) raises :class:`PortalError`, a ``NotSupportedError``, with the cause.
@@ -87,28 +87,168 @@ _ENDED = (
 # Restore tokens
 # --------------------------------------------------------------------------- #
 
+#: libsecret schema name and the attributes that find our one item.
+SECRET_SCHEMA = "dev.lcu.RemoteDesktopToken"
+SECRET_ATTRIBUTES = {"purpose": "remote-desktop-restore-token"}
+SECRET_LABEL = "linux-computer-use remote desktop permission"
 
-class TokenStore:
-    """The RemoteDesktop restore token, in a 0600 file under XDG_STATE_HOME.
+#: ``LCU_TOKEN_STORE=file`` keeps the token in the file even when a keyring exists.
+TOKEN_STORE_ENV = "LCU_TOKEN_STORE"
 
-    A restore token lets a later session skip the permission dialog, so it is
-    treated like a credential: owner-only file in an owner-only directory.
+
+def _load_secret() -> Any | None:
+    try:
+        gi = importlib.import_module("gi")
+        gi.require_version("Secret", "1")
+        return importlib.import_module("gi.repository.Secret")
+    except (ImportError, ValueError):
+        return None
+
+
+class Keyring:
+    """The restore token in the desktop's secret store, through libsecret.
+
+    It never asks the user to unlock anything: a locked keyring counts as
+    unavailable, and :class:`TokenStore` falls back to its file.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, secret: Any) -> None:
+        self._secret = secret
+        self._schema = secret.Schema.new(
+            SECRET_SCHEMA,
+            secret.SchemaFlags.NONE,
+            dict.fromkeys(SECRET_ATTRIBUTES, secret.SchemaAttributeType.STRING),
+        )
+
+    @classmethod
+    def open(cls) -> Keyring | None:
+        """A keyring backend, or None when libsecret's typelib isn't installed."""
+        secret = _load_secret()
+        return cls(secret) if secret is not None else None
+
+    def _service(self) -> Any:
+        return self._secret.Service.get_sync(self._secret.ServiceFlags.NONE, None)
+
+    def _items(self, flags: Any) -> list[Any]:
+        # No SearchFlags.UNLOCK: unlocking would pop up a password prompt.
+        return list(
+            self._service().search_sync(self._schema, dict(SECRET_ATTRIBUTES), flags, None) or []
+        )
+
+    def load(self) -> str | None:
+        for item in self._items(self._secret.SearchFlags.LOAD_SECRETS):
+            if item.get_locked():
+                continue
+            value = item.get_secret()
+            text = value.get_text() if value is not None else None
+            if text and text.strip():
+                return str(text).strip()
+        return None
+
+    def save(self, token: str) -> None:
+        secret = self._secret
+        collection = secret.Collection.for_alias_sync(
+            self._service(), secret.COLLECTION_DEFAULT, secret.CollectionFlags.NONE, None
+        )
+        if collection is None:
+            raise RuntimeError("the secret service has no default keyring")
+        if collection.get_locked():
+            raise RuntimeError("the default keyring is locked")
+        secret.Item.create_sync(
+            collection,
+            self._schema,
+            dict(SECRET_ATTRIBUTES),
+            SECRET_LABEL,
+            secret.Value.new(token, len(token.encode()), "text/plain"),
+            secret.ItemCreateFlags.REPLACE,
+            None,
+        )
+
+    def clear(self) -> None:
+        for item in self._items(self._secret.SearchFlags.ALL):
+            if not item.get_locked():
+                item.delete_sync(None)
+
+
+class TokenStore:
+    """The RemoteDesktop restore token.
+
+    A restore token lets a later session skip the permission dialog, so it is
+    treated like a credential. It lives in the desktop keyring (libsecret)
+    when one is reachable and unlocked; otherwise in a 0600 file in a 0700
+    directory under XDG_STATE_HOME. A token found in the file is moved into
+    the keyring on first load, and the file is deleted.
+
+    ``keyring="auto"`` uses libsecret when its typelib is installed, unless
+    ``LCU_TOKEN_STORE=file``; ``keyring=None`` uses only the file.
+    """
+
+    def __init__(self, path: Path | None = None, keyring: Keyring | str | None = "auto") -> None:
         if path is None:
             state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
             path = Path(state) / "linux-computer-use" / "remote-desktop-token"
         self.path = path
+        if keyring == "auto":
+            use_file = os.environ.get(TOKEN_STORE_ENV, "").strip().lower() == "file"
+            keyring = None if use_file else Keyring.open()
+        if isinstance(keyring, str):
+            raise ValueError(f"keyring must be 'auto', None or a Keyring, not {keyring!r}")
+        self.keyring: Keyring | None = keyring
+
+    # The keyring is optional: any failure there (no secret service, locked,
+    # D-Bus error) is logged and the file is used instead.
+
+    def _keyring_load(self) -> tuple[bool, str | None]:
+        if self.keyring is None:
+            return False, None
+        try:
+            return True, self.keyring.load()
+        except Exception as exc:
+            logger.debug("keyring unavailable for loading: %s", exc)
+            return False, None
+
+    def _keyring_save(self, token: str) -> bool:
+        if self.keyring is None:
+            return False
+        try:
+            self.keyring.save(token)
+        except Exception as exc:
+            logger.debug("keyring unavailable for saving: %s", exc)
+            return False
+        return True
 
     def load(self) -> str | None:
+        reachable, token = self._keyring_load()
+        if token:
+            self._clear_file()  # a leftover file token is older than the keyring's
+            return token
+        file_token = self._load_file()
+        if file_token and reachable and self._keyring_save(file_token):
+            self._clear_file()
+        return file_token
+
+    def save(self, token: str) -> None:
+        if self._keyring_save(token):
+            self._clear_file()
+        else:
+            self._save_file(token)
+
+    def clear(self) -> None:
+        if self.keyring is not None:
+            try:
+                self.keyring.clear()
+            except Exception as exc:
+                logger.debug("keyring unavailable for clearing: %s", exc)
+        self._clear_file()
+
+    def _load_file(self) -> str | None:
         try:
             token = self.path.read_text().strip()
         except OSError:
             return None
         return token or None
 
-    def save(self, token: str) -> None:
+    def _save_file(self, token: str) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path.parent.chmod(0o700)
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -116,7 +256,7 @@ class TokenStore:
             f.write(token)
         self.path.chmod(0o600)
 
-    def clear(self) -> None:
+    def _clear_file(self) -> None:
         with contextlib.suppress(FileNotFoundError):
             self.path.unlink()
 

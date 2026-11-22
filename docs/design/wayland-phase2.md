@@ -12,10 +12,14 @@ the open GNOME focus check except keyboard input itself.
 
 ## What was built, and where it differs from the plan
 
-- **2a** is `drivers/portal.py`. The restore token is kept in a `0600` file
-  under `$XDG_STATE_HOME/linux-computer-use/` (directory `0700`), not yet in
-  libsecret: the file needs no extra typelib and works headless. Moving it to
-  the secret store is a small follow-up.
+- **2a** is `drivers/portal.py`. The restore token is kept in the desktop
+  keyring through libsecret (`gi.repository.Secret`, schema
+  `dev.lcu.RemoteDesktopToken`). The keyring is never unlocked on our behalf,
+  since a password prompt would block the server: when it is locked,
+  unreachable or the typelib is missing, the token goes to a `0600` file
+  under `$XDG_STATE_HOME/linux-computer-use/` (directory `0700`). A file token
+  is moved into the keyring on first load. `LCU_TOKEN_STORE=file` forces the
+  file.
 - **2b**: the screenshot is moved out of wherever the portal saved it (GNOME
   saves to `~/Pictures/Screenshots`) into the session's private temp dir, so
   no copy is left behind. On both drivers, `screenshot_desktop` refuses
@@ -190,10 +194,36 @@ PRs 1 to 3 and 2d's scrolling landed together in one PR.
 Phase 3 (uinput keyboard, `drivers/uinput.py`) landed in the same PR: opt-in with
 `LCU_WAYLAND_UINPUT=us`, the same focus and password gate, US layout only.
 
-## What needs a real GNOME or KDE session
+## Real GNOME in CI
 
-None of this can be proven in CI's headless Weston, which has no portal
-backend. Before each PR merges, someone runs a short manual script on GNOME
+`tests/integration/run_gnome.sh` runs real headless GNOME Shell (46 on Ubuntu
+24.04) with xdg-desktop-portal and its GNOME backend, and
+`tests/integration/test_gnome_live.py` checks, against GNOME's own portal:
+
+- the RemoteDesktop dialog appears and, once approved, returns a restore
+  token; a second session with that token shows no dialog;
+- with two GTK 4 windows, typed text lands only in the one GNOME focused, a
+  key aimed at the other is refused by the AT-SPI focus gate, and switching
+  focus switches where keys go;
+- `screenshot_desktop` returns a full-screen image through the Screenshot
+  portal and leaves no copy in `~/Pictures`.
+
+Nobody can click in CI, so `tests/integration/apps/approve_portal.py` approves
+the portal's GTK 4 dialog over AT-SPI (tick "Allow Remote Interaction", then
+press Share). The shell runs with `--unsafe-mode` so the tests can focus a
+window with `org.gnome.Shell.Eval`. The Screenshot permission is granted in
+the permission store, as "Allow" would. Two things are particular to a
+headless shell: there is no keyboard until the RemoteDesktop session sends a
+first key, so the test taps Shift before focusing; and outside a login
+session the script starts a system bus and a python-dbusmock logind.
+
+The `gnome-live` CI job runs this in an `ubuntu:24.04` container.
+
+## What still needs a real GNOME or KDE session
+
+KDE, the lock screen, the user ending the session from the desktop, a real
+keyboard layout, and a real `/dev/uinput` aren't covered by the GNOME CI job.
+Before a PR changing those paths merges, someone runs a short manual script on GNOME
 (and KDE when possible): approve the dialog, restart the server and confirm
 the token skips it, lock the screen and confirm a clean refusal, then the
 slice's own action. Those scripts go in `tests/manual/`.
