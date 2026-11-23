@@ -107,6 +107,16 @@ show_error_codes = true
 module = ["gi", "gi.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# The MCP Python SDK ships no py.typed marker.
+module = ["mcp", "mcp.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Pillow ships no py.typed marker.
+module = ["PIL", "PIL.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
