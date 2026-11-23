@@ -105,6 +105,28 @@ def main() -> int:
             print(f"{w.window_id}\t{w.title}")
         return 0
 
+    if args.command == "screenshot":
+        from linux_computer_use.mcp.server import get_driver
+        desktop_driver = get_driver()
+        out = args.output
+        if args.window is not None:
+            path = desktop_driver.screenshot_window(args.window)
+            if not path:
+                print("Screenshot failed.", file=sys.stderr)
+                return 1
+        else:
+            path = desktop_driver.screenshot_desktop()
+            if not path:
+                print("Screenshot failed.", file=sys.stderr)
+                return 1
+        if out is not None:
+            from shutil import copyfile
+            copyfile(path, out)
+            print(out)
+        else:
+            print(path)
+        return 0
+
     print(f"Command '{args.command}' not yet implemented", file=sys.stderr)
     return 1
 

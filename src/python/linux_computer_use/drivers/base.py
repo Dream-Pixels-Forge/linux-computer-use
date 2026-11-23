@@ -132,12 +132,40 @@ class Driver(ABC):
         """Click on an element."""
 
     @abstractmethod
+    def click_coordinate(self, x: int, y: int) -> bool:
+        """Click at absolute screen coordinates."""
+
+    @abstractmethod
     def type_text(self, text: str, element: Element) -> bool:
         """Type text into an element."""
 
     @abstractmethod
+    def press_key(self, keys: str, element: Element | None = None) -> bool:
+        """Press a key or key combination."""
+
+    @abstractmethod
     def scroll(self, direction: str, amount: int, element: Element) -> bool:
         """Scroll in an element."""
+
+    @abstractmethod
+    def focus_window(self, window_id: int) -> bool:
+        """Bring a window to the foreground and give it keyboard focus."""
+
+    @abstractmethod
+    def get_focused_window(self) -> int | None:
+        """Return the id of the window that currently has keyboard focus, or None."""
+
+    @abstractmethod
+    def get_window(self, window_id: int) -> Window | None:
+        """Look up one window by id, or None if it no longer exists."""
+
+    @abstractmethod
+    def resolve_element(self, window_id: int, index: int) -> Element | None:
+        """Re-read one element from the last tree snapshot for a window."""
+
+    @abstractmethod
+    def check_sensitive(self, window_id: int) -> list[str]:
+        """Reasons the window contains a secret (e.g. a password field), or []."""
 
     @abstractmethod
     def screenshot_window(self, window_id: int) -> str:

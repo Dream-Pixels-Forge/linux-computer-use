@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
     "coverage>=7.0.0",
+    "PyYAML>=6.0",
 ]
 mcp = [
     "mcp>=2.0,<3",
@@ -105,6 +106,16 @@ show_error_codes = true
 [[tool.mypy.overrides]]
 # PyGObject ships no type stubs.
 module = ["gi", "gi.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The MCP Python SDK ships no py.typed marker.
+module = ["mcp", "mcp.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Pillow ships no py.typed marker.
+module = ["PIL", "PIL.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
