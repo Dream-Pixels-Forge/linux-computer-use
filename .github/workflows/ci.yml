@@ -87,17 +87,21 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install Weston, AT-SPI, GTK and Qt 6
+      - name: Install Weston, AT-SPI and GTK
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             weston dbus at-spi2-core libatk-adaptor gir1.2-atspi-2.0 \
             python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
-            python3-pyside6 \
             libgirepository-2.0-dev libcairo2-dev pkg-config
 
       - name: Install
         run: pip install -e ".[dev,atspi]"
+
+      # python3-pyside6 is not in the Ubuntu 24.04 (noble) apt archive;
+      # install PySide6 from PyPI so the qt6 toolkit test can run in CI.
+      - name: Install PySide6 (Qt 6)
+        run: pip install PySide6
 
       - name: Integration tests
         env:
