@@ -1,17 +1,31 @@
 """End-to-end test: the Wayland driver, through the real MCP server.
 
 Needs a Wayland compositor (WAYLAND_DISPLAY), a D-Bus session with the AT-SPI
-bus, PyGObject here, and a Python with GTK 3 and GTK 4 for the demo apps
-(LCU_GTK_PYTHON, default /usr/bin/python3). In CI, inside dbus-run-session:
+bus, and a Python with the demo apps' toolkit. In CI, inside dbus-run-session:
 
     weston --backend=headless --socket=wayland-1 &
     WAYLAND_DISPLAY=wayland-1 pytest tests/integration/test_wayland_live.py
+
+Toolkits (each skips when its runtime is missing):
+
+    gtk3, gtk4   GTK 3/4 demo apps launched with LCU_GTK_PYTHON (default /usr/bin/python3)
+    qt6          PySide6 demo app, runs when PySide6 is importable
+    firefox      demo.html via Firefox (needs MOZ_ENABLE_WAYLAND=1 + fresh profile)
+    chromium     demo.html via Chromium with --force-renderer-accessibility
+    libreoffice  soffice (AT-SPI exposure under headless Weston unverified)
+
+Non-GTK toolkits (qt6, firefox, chromium, libreoffice) only run when
+explicitly opted in via LCU_WAYLAND_LIVE_TOOLKITS, since they need
+compositor-specific setup that isn't safe to assume everywhere:
+
+    LCU_WAYLAND_LIVE_TOOLKITS=qt6 pytest tests/integration/test_wayland_live.py
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -34,18 +48,74 @@ def _gtk(version: str) -> bool:
     return subprocess.run([GTK_PYTHON, "-c", check], capture_output=True, check=False).returncode == 0
 
 
-pytestmark = pytest.mark.skipif(
+def _qt6() -> bool:
+    return subprocess.run(
+        [sys.executable, "-c", "import PySide6"], capture_output=True, check=False
+    ).returncode == 0
+
+
+def _binary(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+_NON_GTK = {"qt6", "firefox", "chromium", "libreoffice"}
+
+
+def _toolkit_enabled(name: str) -> bool:
+    if name not in _NON_GTK:
+        return True
+    enabled = [t.strip() for t in os.environ.get("LCU_WAYLAND_LIVE_TOOLKITS", "").split(",") if t.strip()]
+    return name in enabled
+
+
+# (check, command factory) per toolkit. The factory receives the demo title
+# and any extra args, and returns the subprocess command list.
+TOOLKITS: dict[str, tuple[Any, Any]] = {
+    "gtk3": (
+        lambda: _gtk("3.0") and _toolkit_enabled("gtk3"),
+        lambda title, *extra: [GTK_PYTHON, str(APPS / "gtk_demo.py"), title, *extra],
+    ),
+    "gtk4": (
+        lambda: _gtk("4.0") and _toolkit_enabled("gtk4"),
+        lambda title, *extra: [GTK_PYTHON, str(APPS / "gtk4_demo.py"), title, *extra],
+    ),
+    "qt6": (
+        lambda: _qt6() and _toolkit_enabled("qt6"),
+        lambda title, *extra: [sys.executable, str(APPS / "qt6_demo.py"), title, *extra],
+    ),
+    "firefox": (
+        lambda: _binary("firefox") and _toolkit_enabled("firefox"),
+        lambda title, *extra: [
+            "firefox",
+            "--new-window",
+            (APPS / "demo.html").as_uri() + "?title=" + title,
+        ],
+    ),
+    "chromium": (
+        lambda: _binary("chromium-browser") or _binary("chromium"),
+        lambda title, *extra: [
+            _binary("chromium-browser") or "chromium",
+            "--force-renderer-accessibility",
+            "--new-window",
+            (APPS / "demo.html").as_uri() + "?title=" + title,
+        ],
+    ),
+    "libreoffice": (
+        lambda: _binary("soffice") and _toolkit_enabled("libreoffice"),
+        lambda title, *extra: ["soffice", "--writer", str(APPS / "demo.html")],
+    ),
+}
+
+_MODULE_SKIP = (
     not os.environ.get("WAYLAND_DISPLAY")
     or not os.environ.get("DBUS_SESSION_BUS_ADDRESS")
     or not ATSPIDriver().available
-    or not _gtk("3.0"),
-    reason="needs a Wayland compositor, a D-Bus session, PyGObject/AT-SPI and GTK",
 )
 
-TOOLKITS = {
-    "gtk3": (APPS / "gtk_demo.py", "3.0"),
-    "gtk4": (APPS / "gtk4_demo.py", "4.0"),
-}
+pytestmark = pytest.mark.skipif(
+    _MODULE_SKIP,
+    reason="needs a Wayland compositor, a D-Bus session and PyGObject/AT-SPI",
+)
 
 
 def _env() -> dict[str, str]:
@@ -54,20 +124,22 @@ def _env() -> dict[str, str]:
     return env
 
 
-def _launch(app: Path, title: str, *extra: str) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        [GTK_PYTHON, str(app), title, *extra],
-        env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+def _launch(cmd: list[str]) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(cmd, env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,)
 
 
-@pytest.fixture(params=sorted(TOOLKITS))
+def _demos_enabled() -> list[str]:
+    return sorted(name for name, (check, _) in TOOLKITS.items() if check())
+
+
+@pytest.fixture(params=_demos_enabled())
 def demo(request: pytest.FixtureRequest) -> Iterator[str]:
-    app, version = TOOLKITS[request.param]
-    if not _gtk(version):
-        pytest.skip(f"needs GTK {version}")
-    title = f"LCU Wayland {request.param}"
-    proc = _launch(app, title)
+    name = request.param
+    check, factory = TOOLKITS[name]
+    if not check():
+        pytest.skip(f"{name} runtime not available")
+    title = f"LCU Wayland {name}"
+    proc = _launch(factory(title))
     yield title
     proc.kill()
     proc.wait()
@@ -75,8 +147,12 @@ def demo(request: pytest.FixtureRequest) -> Iterator[str]:
 
 @pytest.fixture
 def login() -> Iterator[str]:
+    name = "gtk3"
+    check, factory = TOOLKITS[name]
+    if not check():
+        pytest.skip(f"{name} runtime not available")
     title = "LCU Wayland Login"
-    proc = _launch(APPS / "gtk_demo.py", title, "--password")
+    proc = _launch(factory(title, "--password"))
     yield title
     proc.kill()
     proc.wait()
@@ -169,13 +245,14 @@ async def test_unsupported_actions_explain_why(demo: str) -> None:
             assert "Wayland" in message or "portal" in message, (tool, message)
 
 
-@pytest.fixture(params=sorted(TOOLKITS))
+@pytest.fixture(params=_demos_enabled())
 def long_list(request: pytest.FixtureRequest) -> Iterator[str]:
-    app, version = TOOLKITS[request.param]
-    if not _gtk(version):
-        pytest.skip(f"needs GTK {version}")
-    title = f"LCU Wayland list {request.param}"
-    proc = _launch(app, title, "--rows", "200")
+    name = request.param
+    check, factory = TOOLKITS[name]
+    if not check():
+        pytest.skip(f"{name} runtime not available")
+    title = f"LCU Wayland list {name}"
+    proc = _launch(factory(title, "--rows", "200"))
     yield title
     proc.kill()
     proc.wait()

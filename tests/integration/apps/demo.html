@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LCU Web Demo</title>
+<style>
+  body { font-family: sans-serif; padding: 16px; }
+  #root { display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+  .row-list { border: 1px solid #ccc; max-height: 150px; overflow-y: auto; padding: 4px; }
+  .row { padding: 4px; cursor: pointer; }
+  .row:hover { background: #eee; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="clicks" role="status" aria-live="polite">Clicks: 0</div>
+  <input id="entry" type="text" role="textbox" aria-label="entry" />
+  <input id="password" type="password" role="textbox" aria-label="password" />
+  <button id="count" role="button">Count</button>
+  <input type="checkbox" id="subscribe" role="checkbox" />
+  <span id="subscribe-label" role="text">Subscribe</span>
+  <div id="list" role="list" class="row-list"></div>
+</div>
+<script>
+  (function () {
+    var clicks = 0;
+    var clicksEl = document.getElementById("clicks");
+    var entry = document.getElementById("entry");
+    var button = document.getElementById("count");
+    var list = document.getElementById("list");
+
+    button.addEventListener("click", function () {
+      clicks += 1;
+      clicksEl.textContent = "Clicks: " + clicks;
+    });
+
+    entry.addEventListener("input", function () {
+      entry.setAttribute("value", entry.value);
+    });
+
+    var rowsParam = (function () {
+      var m = /[?&]rows=(\d+)/.exec(window.location.search);
+      return m ? parseInt(m[1], 10) : 0;
+    })();
+    for (var i = 0; i < rowsParam; i += 1) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.id = "row-" + i;
+      row.setAttribute("role", "listitem");
+      row.setAttribute("aria-label", "Row " + i);
+      row.textContent = "Row " + i;
+      row.addEventListener("click", (function (i) {
+        return function () {
+          clicksEl.textContent = "Picked " + i;
+        };
+      })(i));
+      list.appendChild(row);
+    }
+  })();
+</script>
+</body>
+</html>

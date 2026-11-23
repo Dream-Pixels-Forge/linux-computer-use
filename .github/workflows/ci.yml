@@ -87,12 +87,13 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install Weston, AT-SPI and GTK
+      - name: Install Weston, AT-SPI, GTK and Qt 6
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             weston dbus at-spi2-core libatk-adaptor gir1.2-atspi-2.0 \
             python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            python3-pyside6 \
             libgirepository-2.0-dev libcairo2-dev pkg-config
 
       - name: Install
