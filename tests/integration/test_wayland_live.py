@@ -58,6 +58,20 @@ def _binary(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _chromium_available() -> bool:
+    """Chromium is a documented blocker: it is not installed in CI and needs
+    --force-renderer-accessibility. Only count it as available if the binary
+    actually runs (shutil.which can return stale paths)."""
+    bin_ = _binary("chromium-browser") or _binary("chromium")
+    if not bin_:
+        return False
+    try:
+        subprocess.run([bin_, "--version"], capture_output=True, check=False, timeout=10)
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 _NON_GTK = {"qt6", "firefox", "chromium", "libreoffice"}
 
 
@@ -92,9 +106,9 @@ TOOLKITS: dict[str, tuple[Any, Any]] = {
         ],
     ),
     "chromium": (
-        lambda: _binary("chromium-browser") or _binary("chromium"),
+        lambda: _chromium_available() and _toolkit_enabled("chromium"),
         lambda title, *extra: [
-            _binary("chromium-browser") or "chromium",
+            _binary("chromium-browser") or _binary("chromium") or "chromium",
             "--force-renderer-accessibility",
             "--new-window",
             (APPS / "demo.html").as_uri() + "?title=" + title,
