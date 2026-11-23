@@ -68,6 +68,31 @@ Not verified here: GNOME Shell (Mutter) and KWin themselves, Qt, Firefox,
 Chromium, Electron and LibreOffice on Wayland, and every portal behaviour
 below. Those need a real GNOME or KDE session.
 
+## Toolkit coverage matrix (subgoal 05, Issue #12)
+
+Live tests exist for every toolkit below (`tests/integration/test_wayland_live.py`,
+parameterized per toolkit; each skips when its runtime is missing). Marks are
+truthful: `yes` only where a live test ran and passed under headless Weston in
+CI; `planned` where the test exists but is unverified; `no` where the feature
+is refused with a clear message.
+
+| Toolkit | Frame listed | Tree readable | Click action | EditableText | Scroll by Value | Active window | Password guard | Notes |
+|---|---|---|---|---|---|---|---|---|
+| GTK 3 | yes | yes | yes | yes | yes | yes | yes | Verified in CI under headless Weston. |
+| GTK 4 | yes | yes | yes | yes | yes | yes | yes | Verified in CI under headless Weston. |
+| Qt 6 (PySide6) | planned | planned | planned | planned | planned | planned | planned | Test exists, skips without PySide6; CI installs `python3-pyside6`. Unrun. |
+| Firefox | planned | planned | planned | planned | planned | planned | planned | Needs `MOZ_ENABLE_WAYLAND=1` + fresh profile; unrun under Weston. |
+| Chromium | planned | planned | planned | planned | planned | planned | planned | Needs `--force-renderer-accessibility`; not installed locally; unrun under Weston. |
+| LibreOffice | planned | planned | planned | planned | planned | planned | planned | `soffice` exists locally but AT-SPI exposure under headless Weston unverified; test added, skip-if-missing. |
+| Electron | no | no | no | no | no | no | no | No Electron runtime / CI package available; refused with a clear message. |
+
+Blockers (documented, not added as broken CI jobs):
+
+- **Electron**: no Electron runtime available; no reasonable CI package. Marked `no`.
+- **Chromium**: not installed locally; `--force-renderer-accessibility` needed. Marked `planned`.
+- **LibreOffice**: `soffice` present but AT-SPI exposure under headless Weston unverified. Marked `planned`.
+- **Firefox**: needs `MOZ_ENABLE_WAYLAND=1` and a fresh profile. Marked `planned`.
+
 ## Input options
 
 ### A. AT-SPI only (no injected input)

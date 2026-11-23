@@ -98,6 +98,11 @@ jobs:
       - name: Install
         run: pip install -e ".[dev,atspi]"
 
+      # python3-pyside6 is not in the Ubuntu 24.04 (noble) apt archive;
+      # install PySide6 from PyPI so the qt6 toolkit test can run in CI.
+      - name: Install PySide6 (Qt 6)
+        run: pip install PySide6
+
       - name: Integration tests
         env:
           LCU_GTK_PYTHON: /usr/bin/python3
