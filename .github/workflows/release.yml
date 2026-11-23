@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must match pyproject.toml, e.g. 0.1.0)"
+        required: true
+        type: string
+
+# One run per ref at a time: a tag push and a manual dispatch for the same
+# release never overlap (no duplicate publish/release runs).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate requested version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.requested.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: requested
+        name: Determine and validate requested version
+        shell: python
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          import os, re, sys, tomllib
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          ref = os.environ["GITHUB_REF"]
+          raw = os.getenv("INPUT_VERSION", "")
+
+          with open("pyproject.toml", "rb") as fh:
+              project = tomllib.load(fh)["project"]["version"]
+
+          semver = r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+
+          if event_name == "workflow_dispatch":
+              # Manual releases are only cut from main.
+              if ref != "refs/heads/main":
+                  sys.exit("error: manual releases are only allowed from main")
+              requested = raw.strip()
+          else:
+              tag = ref.rsplit("/", 1)[-1]
+              if not tag.startswith("v"):
+                  sys.exit(f"error: unexpected tag: {tag}")
+              requested = tag[1:]
+
+          if not re.fullmatch(semver, requested):
+              sys.exit(f"error: not a strict semver release version: {requested}")
+          if requested != project:
+              sys.exit(f"error: version {requested} does not match pyproject.toml {project}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={requested}\n")
+
+  build:
+    name: Build sdist and wheel
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build frontend
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ needs.validate.outputs.version }}
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (OIDC)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.validate.outputs.version }}
+          path: dist/
+
+      # OIDC only: no username/password. Requires a PyPI trusted publisher
+      # for linux-computer-use (see docs/releasing.md).
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+
+  release:
+    name: Create GitHub Release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.validate.outputs.version }}
+          path: dist/
+
+      - name: Ensure annotated tag exists (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ needs.validate.outputs.version }}" -m "Release v${{ needs.validate.outputs.version }}"
+          git push origin "v${{ needs.validate.outputs.version }}"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.validate.outputs.version }}
+          name: Release v${{ needs.validate.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+
+  verify:
+    name: Verify registry and fresh install
+    needs: [publish, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Confirm PyPI registry entry
+        run: |
+          curl -fsSL "https://pypi.org/pypi/linux-computer-use/json" \
+            | python3 -c "import json, sys; data = json.load(sys.stdin); assert '${{ needs.validate.outputs.version }}' in data['releases'], data['releases']"
+
+      - name: Confirm tag and GitHub Release
+        run: |
+          git ls-remote --exit-code --tags origin "refs/tags/v${{ needs.validate.outputs.version }}"
+          gh release view "v${{ needs.validate.outputs.version }}"
+
+      - name: Fresh-venv verification
+        run: |
+          python3 -m venv /tmp/lcu-verify
+          /tmp/lcu-verify/bin/pip install --quiet linux-computer-use==${{ needs.validate.outputs.version }}
+          /tmp/lcu-verify/bin/python -c "from importlib.metadata import version; assert version('linux-computer-use') == '${{ needs.validate.outputs.version }}'"
