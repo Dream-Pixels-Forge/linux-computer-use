@@ -54,8 +54,8 @@ def _qt6() -> bool:
     ).returncode == 0
 
 
-def _binary(name: str) -> bool:
-    return shutil.which(name) is not None
+def _binary(name: str) -> str | None:
+    return shutil.which(name)
 
 
 _NON_GTK = {"qt6", "firefox", "chromium", "libreoffice"}
